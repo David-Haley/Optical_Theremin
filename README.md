@@ -1,4 +1,4 @@
-# Distance Measurement
+# Optical Theremin
 
 Firmware for a Raspberry Pi Pico W that reads distance in millimeters from an
 ST VL53L0X time-of-flight sensor over I2C and reports it over USB serial.
