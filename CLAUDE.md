@@ -6,17 +6,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An optical theremin for a Raspberry Pi Pico W: an ST VL53L0X time-of-flight
 sensor measures hand distance (mm) over I2C, and a DDS (direct digital
-synthesis) tone generator will turn that distance into an audio tone.
+synthesis) tone generator turns that distance into a tone, streamed over I2S
+to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state:
+Current state (stage 2, spec in `Documents/Stage_2.md`): the sensor is polled
+at 20 Hz and sets the pitch; the waveform is fixed at `Sine_2` and the DAC
+volume at 0 dB. USB serial carries diagnostic and error messages only — no
+distance readings. The CMake target is still `distance_measurement`, from
+the distance-measurement app the project grew from.
 
-- The Pico firmware (`src/main.c`) reads the sensor and prints the distance
-  over USB serial. This is the original distance-measurement app the project
-  grew from, which is why the CMake target is still `distance_measurement`.
-- An Ada configuration tool (`src/optical_theremin.adb`) generates the DDS
-  lookup tables and C headers (`src/dds_generator.h`, `src/dds_table.h`).
-- `src/dds_generator.c`, which implements `DDS_Generator()`, is not written
-  yet. Audio output is planned via a PCM5122 DAC (datasheet in `Documents/`).
+### Pins (Pico physical pin → GPIO)
+
+| Signal | Pin | GPIO | Peripheral |
+|---|---|---|---|
+| VL53L0X SDA / SCL | 1 / 2 | GP0 / GP1 | I2C0, addr 0x29 |
+| PCM5122 SDA / SCL | 4 / 5 | GP2 / GP3 | I2C1, addr 0x4D |
+| I2S DIN | 31 | GP26 | PIO0 |
+| I2S BCK | 26 | GP20 | PIO0 side-set |
+| I2S LRCK | 27 | GP21 | PIO0 side-set (must be BCK + 1) |
+
+`Documents/Stage_2.md` lists the PCM5122 SDA as "pin 3"; that is the Pi
+40-pin header numbering. On the Pico it is pin 4 (GP2). It also lists BCK and
+LRCK on pins 32/34 (GP27/GP28); they were moved to GP20/GP21 because GP28 on
+this board can no longer be driven low (it reads back high even with nothing
+connected). Don't use GP28.
 
 `instructions.txt` is the original task spec for the distance-measurement
 app; the paths in it refer to the project's old location
@@ -133,11 +146,41 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   - `src/vl53l0x_i2c_win_serial_comms.c` and `src/vl53l0x_platform_log.c` are
     the original Windows-only files, kept for reference but **not** listed in
     `CMakeLists.txt`'s sources — don't add them to the build.
-- `src/main.c` — application entry point: brings up I2C via
-  `VL53L0X_comms_initialise()`, runs the sensor init sequence, then loops
-  `VL53L0X_PerformSingleRangingMeasurement()` and prints `Distance: N mm`
-  (or the range status) every 200ms over USB serial (`pico_enable_stdio_usb`
-  is on, UART stdio is off).
+- `src/main.c` — application entry point: runs the VL53L0X init sequence,
+  starts the I2S output, initialises the PCM5122, then every 50 ms (20 Hz,
+  `sleep_until`) takes a single ranging measurement and passes the distance
+  to `I2S_Output_Set_Distance()`. Out-of-range or failed measurements pass
+  `Lowest_Note_MM`. Measurement problems are printed only when the status
+  changes (`pico_enable_stdio_usb` is on, UART stdio is off).
+- `src/dds_generator.c` — `DDS_Generator()`, see the DDS design above.
+- `src/audio_i2s.pio` — 8-instruction I2S transmitter: 16-bit stereo,
+  32 BCK per frame (BCK = 1.4112 MHz), 2 PIO cycles per bit (fractional
+  clock divider from the 125 MHz system clock). Each 32-bit FIFO word is one
+  frame: bits 31..16 right, 15..0 left.
+- `src/i2s_output.c` — PIO0 plus two DMA channels chained ping-pong over two
+  128-frame buffers (~2.9 ms each). The DMA_IRQ_0 handler refills the
+  finished buffer from `DDS_Generator()` and rearms it. The distance is
+  passed from the main loop through a `volatile int`. The handler, the
+  buffers and the DDS code/tables all live in RAM.
+  `I2S_Output_Report_Status()` (printed only when `PCM5122_Init()` fails)
+  shows the state machine/DMA state and, for each I2S pin, the transitions
+  the PIO drives against those read back from the pad over 1 ms. Driven
+  transitions with none read back mean something external is holding the
+  pin — that is how the dead GP28 was found.
+- `src/pcm5122.c` — DAC set-up over I2C1. No master clock (SCK) is wired, so
+  the PCM5122 runs in 3-wire mode with its PLL referenced to BCK (datasheet
+  §8.3.6.3); the I2S stream must already be running when `PCM5122_Init()`
+  is called. Register sequence (page 0): standby → reset → PLL ref = BCK
+  (0x0D=0x10) → ignore SCK detection/halt (0x25=0x18) → I2S 16-bit
+  (0x28=0x00) → volume 0 dB (0x3D/0x3E=0x30) → unmute → leave standby, then
+  wait for reg 118 power state 0x5 (Run). If the PLL doesn't lock it prints
+  regs 4, 91, 94, 95 and 118 (PLL lock, detected FS, clock status/errors,
+  power state). If the DAC doesn't acknowledge at all it prints the I2C1
+  idle levels and a bus scan with acknowledged/NACK/timeout counts — all
+  NACKs means a working bus with nothing answering (in practice: the DAC
+  board's power supply was missing).
+  If the PLL won't lock, the next things to try are 64 BCK/frame (32-bit
+  slots) or disabling clock autoset (DCAS) and setting the PLL manually.
 
 ### Known API gotcha
 
