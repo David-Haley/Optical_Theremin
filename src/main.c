@@ -25,6 +25,14 @@
 #define POLL_PERIOD_MS        50 /* 20 Hz */
 
 /*
+ * Part-to-part range offset, replacing the factory (NVM) value of 125.5 mm,
+ * which made every reading far too long. Set so that a flat card at 300 mm
+ * reads 300 mm; with no offset it read 316 mm. The device adds the offset
+ * to each range.
+ */
+#define RANGE_OFFSET_MM       -16
+
+/*
  * Distance filter: a median of the last MEDIAN_LENGTH readings rejects
  * isolated spikes and dropouts, then an exponential moving average with
  * alpha = 1 / 2^SMOOTHING_SHIFT smooths the remaining jitter. Larger values
@@ -111,6 +119,9 @@ int main(void)
 	uint8_t is_aperture_spads;
 	die_on_error("PerformRefSpadManagement",
 		     VL53L0X_PerformRefSpadManagement(Dev, &ref_spad_count, &is_aperture_spads));
+
+	die_on_error("SetOffsetCalibrationDataMicroMeter",
+		     VL53L0X_SetOffsetCalibrationDataMicroMeter(Dev, RANGE_OFFSET_MM * 1000));
 
 	die_on_error("SetDeviceMode",
 		     VL53L0X_SetDeviceMode(Dev, VL53L0X_DEVICEMODE_SINGLE_RANGING));

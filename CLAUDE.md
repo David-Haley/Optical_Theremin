@@ -203,7 +203,17 @@ unimplemented stub in this API version — it always returns
 it's not part of the real VL53L0X init sequence. The correct sequence (as
 used in `main.c`) is: `VL53L0X_comms_initialise` → `VL53L0X_DataInit` →
 `VL53L0X_StaticInit` → `VL53L0X_PerformRefCalibration` →
-`VL53L0X_PerformRefSpadManagement` → `VL53L0X_SetDeviceMode`.
+`VL53L0X_PerformRefSpadManagement` → offset correction → `VL53L0X_SetDeviceMode`.
+
+This sensor's factory NVM part-to-part offset (125.5 mm) is wrong and made
+every reading far too long, so `main.c` replaces it with `RANGE_OFFSET_MM`
+(−16 mm, set so a flat card at 300 mm reads 300) via
+`VL53L0X_SetOffsetCalibrationDataMicroMeter`. The device adds the offset to
+each range, so positive = longer readings. Readings also appeared to be
+scaled short (~0.84–0.89) but the 100/200 mm test points weren't held
+reliably, so no gain correction is applied. `VL53L0X_SetLinearityCorrectiveGain`
+can only scale down (max 1000/1000), so any future gain correction must be
+done in firmware.
 
 `RangeStatus` on a measurement is a sensor-reported quality code, not a
 plumbing error — e.g. status 4 (`PHASE_FAIL`) just means no target is in
