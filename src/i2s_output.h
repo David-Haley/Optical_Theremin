@@ -6,6 +6,8 @@
 #ifndef I2S_OUTPUT_H
 #define I2S_OUTPUT_H
 
+#include "dds_generator.h"
+
 // Pico GPIO numbers (physical pin numbers in the comments).
 #define I2S_DIN_Pin  26 // pin 31
 #define I2S_BCK_Pin  20 // pin 26, LRCK must be BCK + 1
@@ -20,6 +22,10 @@ void I2S_Output_Start (void);
 // Values outside Highest_Note_MM .. Lowest_Note_MM are clamped
 // by DDS_Generator.
 void I2S_Output_Set_Distance (int Distance);
+
+// Sets the waveform produced by DDS_Generator. The phase is
+// continuous across a change so switching does not click.
+void I2S_Output_Set_Waveform (Waveforms Waveform);
 
 // Prints the PIO state machine and DMA state and, for each I2S pin,
 // the transitions driven by the PIO against those read back from the

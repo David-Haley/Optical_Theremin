@@ -1,9 +1,10 @@
 /*
  * Optical theremin: polls a VL53L0X time-of-flight sensor (I2C0,
- * GPIO0/GPIO1, header pins 1 and 2) at 20 Hz and uses the distance to set
- * the frequency of the DDS tone generator, whose samples are streamed over
- * I2S to a PCM5122 DAC. USB serial carries diagnostic and error messages
- * only.
+ * GPIO0/GPIO1, header pins 1 and 2) at 20 Hz and uses the filtered distance
+ * to set the frequency of the DDS tone generator, whose samples are streamed
+ * over I2S to a PCM5122 DAC. The waveform is selected by grounding one of
+ * header pins 14 to 17 (see waveform_select.h). USB serial carries
+ * diagnostic and error messages only.
  */
 
 #include <stdio.h>
@@ -17,10 +18,32 @@
 #include "dds_generator.h"
 #include "i2s_output.h"
 #include "pcm5122.h"
+#include "waveform_select.h"
 
 #define VL53L0X_I2C_ADDRESS   0x29
 #define VL53L0X_I2C_SPEED_KHZ 400
 #define POLL_PERIOD_MS        50 /* 20 Hz */
+
+/*
+ * Part-to-part range offset, replacing the factory (NVM) value of 125.5 mm,
+ * which made every reading far too long. Set so that a flat card at 300 mm
+ * reads 300 mm; with no offset it read 316 mm. The device adds the offset
+ * to each range.
+ */
+#define RANGE_OFFSET_MM       -16
+
+/*
+ * Distance filter: a median of the last MEDIAN_LENGTH readings rejects
+ * isolated spikes and dropouts, then an exponential moving average with
+ * alpha = 1 / 2^SMOOTHING_SHIFT smooths the remaining jitter. Larger values
+ * are steadier but slower to follow the hand: at 20 Hz, shift 1 lags about
+ * 100 ms and shift 2 about 200 ms.
+ */
+#define MEDIAN_LENGTH   3
+#define SMOOTHING_SHIFT 1
+#define FILTER_FRACTION 4 /* fractional bits kept by the average */
+
+static const char *const waveform_names[] = { "Sine", "Sine_2", "Triangle", "Square" };
 
 static void die_on_error(const char *step, VL53L0X_Error status)
 {
@@ -29,6 +52,43 @@ static void die_on_error(const char *step, VL53L0X_Error status)
 		while (true)
 			tight_loop_contents();
 	}
+}
+
+static int median3(int a, int b, int c)
+{
+	if (a > b) {
+		int t = a;
+		a = b;
+		b = t;
+	}
+	/* now a <= b */
+	if (c < a)
+		return a;
+	if (c > b)
+		return b;
+	return c;
+}
+
+_Static_assert(MEDIAN_LENGTH == 3, "median3 expects MEDIAN_LENGTH == 3");
+
+static int filter_distance(int raw)
+{
+	static int history[MEDIAN_LENGTH] = { Lowest_Note_MM, Lowest_Note_MM, Lowest_Note_MM };
+	static int next;
+	static int filtered = Lowest_Note_MM << FILTER_FRACTION;
+
+	/* Keep far out-of-range readings from dragging the average. */
+	if (raw < Highest_Note_MM)
+		raw = Highest_Note_MM;
+	else if (raw > Lowest_Note_MM)
+		raw = Lowest_Note_MM;
+
+	history[next] = raw;
+	next = (next + 1) % MEDIAN_LENGTH;
+
+	int median = median3(history[0], history[1], history[2]);
+	filtered += ((median << FILTER_FRACTION) - filtered) >> SMOOTHING_SHIFT;
+	return (filtered + (1 << (FILTER_FRACTION - 1))) >> FILTER_FRACTION;
 }
 
 int main(void)
@@ -60,10 +120,18 @@ int main(void)
 	die_on_error("PerformRefSpadManagement",
 		     VL53L0X_PerformRefSpadManagement(Dev, &ref_spad_count, &is_aperture_spads));
 
+	die_on_error("SetOffsetCalibrationDataMicroMeter",
+		     VL53L0X_SetOffsetCalibrationDataMicroMeter(Dev, RANGE_OFFSET_MM * 1000));
+
 	die_on_error("SetDeviceMode",
 		     VL53L0X_SetDeviceMode(Dev, VL53L0X_DEVICEMODE_SINGLE_RANGING));
 
 	printf("VL53L0X ready\n");
+
+	Waveform_Select_Init();
+	Waveforms waveform = Waveform_Select_Read();
+	I2S_Output_Set_Waveform(waveform);
+	printf("Waveform %s\n", waveform_names[waveform]);
 
 	/* BCK/LRCK must be running before the PCM5122 is configured. */
 	I2S_Output_Start();
@@ -91,9 +159,16 @@ int main(void)
 		uint8_t range_status = status == VL53L0X_ERROR_NONE ? measurement.RangeStatus : 0;
 
 		if (status == VL53L0X_ERROR_NONE && range_status == 0)
-			I2S_Output_Set_Distance(measurement.RangeMilliMeter);
+			I2S_Output_Set_Distance(filter_distance(measurement.RangeMilliMeter));
 		else
-			I2S_Output_Set_Distance(Lowest_Note_MM);
+			I2S_Output_Set_Distance(filter_distance(Lowest_Note_MM));
+
+		Waveforms selected = Waveform_Select_Read();
+		if (selected != waveform) {
+			waveform = selected;
+			I2S_Output_Set_Waveform(waveform);
+			printf("Waveform %s\n", waveform_names[waveform]);
+		}
 
 		if (status != last_status || range_status != last_range_status) {
 			if (status != VL53L0X_ERROR_NONE)

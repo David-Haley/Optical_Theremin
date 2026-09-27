@@ -9,9 +9,10 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 2, spec in `Documents/Stage_2.md`): the sensor is polled
-at 20 Hz and sets the pitch; the waveform is fixed at `Sine_2` and the DAC
-volume at 0 dB. USB serial carries diagnostic and error messages only — no
+Current state (stage 3, spec in `Documents/Stage_3.md`; stage 2 in
+`Stage_2.md`): the sensor is polled at 20 Hz and its filtered distance sets
+the pitch; the waveform is selected by grounding one of four GPIO inputs; the
+DAC volume is fixed at 0 dB. USB serial carries diagnostic and error messages only — no
 distance readings. The CMake target is still `distance_measurement`, from
 the distance-measurement app the project grew from.
 
@@ -24,6 +25,8 @@ the distance-measurement app the project grew from.
 | I2S DIN | 31 | GP26 | PIO0 |
 | I2S BCK | 26 | GP20 | PIO0 side-set |
 | I2S LRCK | 27 | GP21 | PIO0 side-set (must be BCK + 1) |
+| Select Sine / Sine_2 | 14 / 15 | GP10 / GP11 | input, pull-up, active low |
+| Select Triangle / Square | 16 / 17 | GP12 / GP13 | input, pull-up, active low |
 
 `Documents/Stage_2.md` lists the PCM5122 SDA as "pin 3"; that is the Pi
 40-pin header numbering. On the Pico it is pin 4 (GP2). It also lists BCK and
@@ -149,18 +152,28 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
 - `src/main.c` — application entry point: runs the VL53L0X init sequence,
   starts the I2S output, initialises the PCM5122, then every 50 ms (20 Hz,
   `sleep_until`) takes a single ranging measurement and passes the distance
-  to `I2S_Output_Set_Distance()`. Out-of-range or failed measurements pass
-  `Lowest_Note_MM`. Measurement problems are printed only when the status
+  through `filter_distance()` to `I2S_Output_Set_Distance()`. Out-of-range
+  or failed measurements feed `Lowest_Note_MM` into the filter. The filter
+  clamps to `Highest_Note_MM..Lowest_Note_MM`, takes a median of 3 (rejects
+  single spikes/dropouts), then an EMA with alpha = 1/2^`SMOOTHING_SHIFT`
+  (1 → ~100 ms lag) in fixed point with 4 fractional bits. It also polls
+  `Waveform_Select_Read()` each loop and prints the waveform on change. Measurement problems are printed only when the status
   changes (`pico_enable_stdio_usb` is on, UART stdio is off).
 - `src/dds_generator.c` — `DDS_Generator()`, see the DDS design above.
+- `src/waveform_select.c` — waveform select inputs GP10–GP13 (pins 14–17),
+  pull-ups, active low. The first low pin in the order Sine, Sine_2,
+  Triangle, Square wins; none low → Sine. Debounced: a change needs two
+  consecutive identical reads, so `Waveform_Select_Read()` must be called
+  ≥20 ms apart (the 50 ms main loop does this).
 - `src/audio_i2s.pio` — 8-instruction I2S transmitter: 16-bit stereo,
   32 BCK per frame (BCK = 1.4112 MHz), 2 PIO cycles per bit (fractional
   clock divider from the 125 MHz system clock). Each 32-bit FIFO word is one
   frame: bits 31..16 right, 15..0 left.
 - `src/i2s_output.c` — PIO0 plus two DMA channels chained ping-pong over two
   128-frame buffers (~2.9 ms each). The DMA_IRQ_0 handler refills the
-  finished buffer from `DDS_Generator()` and rearms it. The distance is
-  passed from the main loop through a `volatile int`. The handler, the
+  finished buffer from `DDS_Generator()` and rearms it. The distance and
+  waveform are passed from the main loop through volatiles
+  (`I2S_Output_Set_Distance()` / `I2S_Output_Set_Waveform()`). The handler, the
   buffers and the DDS code/tables all live in RAM.
   `I2S_Output_Report_Status()` (printed only when `PCM5122_Init()` fails)
   shows the state machine/DMA state and, for each I2S pin, the transitions
@@ -190,7 +203,17 @@ unimplemented stub in this API version — it always returns
 it's not part of the real VL53L0X init sequence. The correct sequence (as
 used in `main.c`) is: `VL53L0X_comms_initialise` → `VL53L0X_DataInit` →
 `VL53L0X_StaticInit` → `VL53L0X_PerformRefCalibration` →
-`VL53L0X_PerformRefSpadManagement` → `VL53L0X_SetDeviceMode`.
+`VL53L0X_PerformRefSpadManagement` → offset correction → `VL53L0X_SetDeviceMode`.
+
+This sensor's factory NVM part-to-part offset (125.5 mm) is wrong and made
+every reading far too long, so `main.c` replaces it with `RANGE_OFFSET_MM`
+(−16 mm, set so a flat card at 300 mm reads 300) via
+`VL53L0X_SetOffsetCalibrationDataMicroMeter`. The device adds the offset to
+each range, so positive = longer readings. Readings also appeared to be
+scaled short (~0.84–0.89) but the 100/200 mm test points weren't held
+reliably, so no gain correction is applied. `VL53L0X_SetLinearityCorrectiveGain`
+can only scale down (max 1000/1000), so any future gain correction must be
+done in firmware.
 
 `RangeStatus` on a measurement is a sensor-reported quality code, not a
 plumbing error — e.g. status 4 (`PHASE_FAIL`) just means no target is in

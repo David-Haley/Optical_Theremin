@@ -15,6 +15,7 @@ add_executable(distance_measurement
     src/dds_generator.c
     src/i2s_output.c
     src/pcm5122.c
+    src/waveform_select.c
     Api/core/src/vl53l0x_api.c
     Api/core/src/vl53l0x_api_core.c
     Api/core/src/vl53l0x_api_calibration.c

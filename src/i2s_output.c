@@ -23,9 +23,6 @@ _Static_assert (I2S_LRCK_Pin == I2S_BCK_Pin + 1,
 // Frames per buffer, 128 frames is approximately 2.9 ms.
 #define Buffer_Frames 128
 
-// The waveform is fixed for this stage.
-#define Output_Waveform Sine_2
-
 static PIO const Audio_Pio = pio0;
 static uint State_Machine;
 static int DMA_Channel [2];
@@ -34,16 +31,18 @@ static uint32_t Buffer [2] [Buffer_Frames];
 // Written by the main loop, read by the DMA interrupt. A 32 bit
 // store is atomic so no further protection is required.
 static volatile int Distance = Lowest_Note_MM;
+static volatile Waveforms Waveform = Sine;
 
 // Fills a buffer with frames. Each frame holds the right sample in
 // bits 31 .. 16 and the left sample in bits 15 .. 0, see
 // audio_i2s.pio.
 static void __time_critical_func (Fill_Buffer) (uint32_t *Frames) {
   const int Current_Distance = Distance;
+  const Waveforms Current_Waveform = Waveform;
   Audio_Sample Sample;
 
   for (int F = 0; F < Buffer_Frames; F++) {
-    Sample = DDS_Generator (Output_Waveform, Current_Distance);
+    Sample = DDS_Generator (Current_Waveform, Current_Distance);
     Frames [F] = ((uint32_t) (uint16_t) Sample.Right << 16) |
                  (uint32_t) (uint16_t) Sample.Left;
   } // F < Buffer_Frames
@@ -142,3 +141,7 @@ void I2S_Output_Report_Status (void) {
 void I2S_Output_Set_Distance (int New_Distance) {
   Distance = New_Distance;
 } // I2S_Output_Set_Distance
+
+void I2S_Output_Set_Waveform (Waveforms New_Waveform) {
+  Waveform = New_Waveform;
+} // I2S_Output_Set_Waveform
