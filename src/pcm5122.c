@@ -11,7 +11,6 @@
 
 #include "pcm5122.h"
 
-#define I2C_Speed_Hz  100000
 #define I2C_Timeout_us 10000
 
 // Page 0 registers
@@ -46,8 +45,8 @@ static const Register_Setting Init_Sequence [] = {
   {PLL_Reference, 0x10}, // SREF = 001, PLL reference is BCK
   {Error_Detect,  0x18}, // IDSK and IDCH, no SCK is supplied
   {I2S_Format,    0x00}, // I2S, 16 bits
-  {Left_Volume,   0x30}, // 0 dB
-  {Right_Volume,  0x30}, // 0 dB
+  {Left_Volume,   PCM5122_Volume_Quietest}, // near silent until the
+  {Right_Volume,  PCM5122_Volume_Quietest}, // first volume reading
   {Mute,          0x00}, // unmute both channels
   {Standby,       0x00}  // normal operation
 };
@@ -72,7 +71,7 @@ static bool Read_Register (const uint8_t Register, uint8_t *Value) {
 // abort such as lost arbitration) or times out. All NACKs indicate a
 // working bus with no device responding; timeouts suggest SCL is being
 // held low or the pull-ups are too weak.
-static void Scan_Bus (void) {
+void PCM5122_Scan_Bus (void) {
   uint8_t Data;
   int Result;
   int Found = 0, NACKs = 0, Timeouts = 0, Others = 0;
@@ -100,6 +99,11 @@ static void Scan_Bus (void) {
           "%d other\n", Found, NACKs, Timeouts, Others);
 } // Scan_Bus
 
+bool PCM5122_Set_Volume (uint8_t Volume) {
+  return Write_Register (Left_Volume, Volume) &&
+         Write_Register (Right_Volume, Volume);
+} // PCM5122_Set_Volume
+
 void PCM5122_Report_Status (void) {
   static const uint8_t Registers [] =
     {PLL, Detected_FS, Clock_Status, Clock_Errors, Power_State};
@@ -120,7 +124,7 @@ bool PCM5122_Init (void) {
   uint8_t State = 0;
   absolute_time_t Timeout;
 
-  i2c_init (PCM5122_I2C_Instance, I2C_Speed_Hz);
+  i2c_init (PCM5122_I2C_Instance, PCM5122_I2C_Speed_Hz);
   gpio_set_function (PCM5122_SDA_Pin, GPIO_FUNC_I2C);
   gpio_set_function (PCM5122_SCL_Pin, GPIO_FUNC_I2C);
   gpio_pull_up (PCM5122_SDA_Pin);
@@ -131,7 +135,7 @@ bool PCM5122_Init (void) {
                          Init_Sequence [S].Value)) {
       printf ("PCM5122 write failed: reg %u = 0x%02X\n",
               Init_Sequence [S].Register, Init_Sequence [S].Value);
-      Scan_Bus ();
+      PCM5122_Scan_Bus ();
       return false;
     } // !Write_Register (...)
     if (Init_Sequence [S].Register == Reset) {

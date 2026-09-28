@@ -65,6 +65,7 @@ typedef unsigned char bool_t;
 /**
  * @brief  Initialise platform comms.
  *
+ * @param  bus             - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  comms_type      - selects between I2C and SPI
  * @param  comms_speed_khz - unsigned short containing the I2C speed in kHz
  *
@@ -72,17 +73,17 @@ typedef unsigned char bool_t;
  *
  */
 
-int32_t VL53L0X_comms_initialise(uint8_t  comms_type,
+int32_t VL53L0X_comms_initialise(uint8_t  bus, uint8_t  comms_type,
                                           uint16_t comms_speed_khz);
 
 /**
- * @brief  Close platform comms.
+ * @brief  Close platform comms on I2C controller bus.
  *
  * @return status - status 0 = ok, 1 = error
  *
  */
 
-int32_t VL53L0X_comms_close(void);
+int32_t VL53L0X_comms_close(uint8_t bus);
 
 /**
  * @brief  Cycle Power to Device
@@ -109,6 +110,7 @@ int32_t VL53L0X_cycle_power(void);
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index - uint8_t register index value
  * @param  pdata - pointer to uint8_t buffer containing the data to be written
@@ -118,7 +120,7 @@ int32_t VL53L0X_cycle_power(void);
  *
  */
 
-int32_t VL53L0X_write_multi(uint8_t address, uint8_t index, uint8_t  *pdata, int32_t count);
+int32_t VL53L0X_write_multi(uint8_t bus, uint8_t address, uint8_t index, uint8_t  *pdata, int32_t count);
 
 
 /**
@@ -136,6 +138,7 @@ int32_t VL53L0X_write_multi(uint8_t address, uint8_t index, uint8_t  *pdata, int
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index - uint8_t register index value
  * @param  pdata - pointer to the uint8_t buffer to store read data
@@ -145,7 +148,7 @@ int32_t VL53L0X_write_multi(uint8_t address, uint8_t index, uint8_t  *pdata, int
  *
  */
 
-int32_t VL53L0X_read_multi(uint8_t address,  uint8_t index, uint8_t  *pdata, int32_t count);
+int32_t VL53L0X_read_multi(uint8_t bus, uint8_t address,  uint8_t index, uint8_t  *pdata, int32_t count);
 
 
 /**
@@ -163,6 +166,7 @@ int32_t VL53L0X_read_multi(uint8_t address,  uint8_t index, uint8_t  *pdata, int
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index - uint8_t register index value
  * @param  data  - uint8_t data value to write
@@ -171,7 +175,7 @@ int32_t VL53L0X_read_multi(uint8_t address,  uint8_t index, uint8_t  *pdata, int
  *
  */
 
-int32_t VL53L0X_write_byte(uint8_t address,  uint8_t index, uint8_t   data);
+int32_t VL53L0X_write_byte(uint8_t bus, uint8_t address,  uint8_t index, uint8_t   data);
 
 
 /**
@@ -190,6 +194,7 @@ int32_t VL53L0X_write_byte(uint8_t address,  uint8_t index, uint8_t   data);
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index - uint8_t register index value
  * @param  data  - uin16_t data value write
@@ -198,7 +203,7 @@ int32_t VL53L0X_write_byte(uint8_t address,  uint8_t index, uint8_t   data);
  *
  */
 
-int32_t VL53L0X_write_word(uint8_t address,  uint8_t index, uint16_t  data);
+int32_t VL53L0X_write_word(uint8_t bus, uint8_t address,  uint8_t index, uint16_t  data);
 
 
 /**
@@ -217,6 +222,7 @@ int32_t VL53L0X_write_word(uint8_t address,  uint8_t index, uint16_t  data);
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index - uint8_t register index value
  * @param  data  - uint32_t data value to write
@@ -225,7 +231,7 @@ int32_t VL53L0X_write_word(uint8_t address,  uint8_t index, uint16_t  data);
  *
  */
 
-int32_t VL53L0X_write_dword(uint8_t address, uint8_t index, uint32_t  data);
+int32_t VL53L0X_write_dword(uint8_t bus, uint8_t address, uint8_t index, uint32_t  data);
 
 
 
@@ -244,6 +250,7 @@ int32_t VL53L0X_write_dword(uint8_t address, uint8_t index, uint32_t  data);
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index  - uint8_t register index value
  * @param  pdata  - pointer to uint8_t data value
@@ -252,7 +259,7 @@ int32_t VL53L0X_write_dword(uint8_t address, uint8_t index, uint32_t  data);
  *
  */
 
-int32_t VL53L0X_read_byte(uint8_t address,  uint8_t index, uint8_t  *pdata);
+int32_t VL53L0X_read_byte(uint8_t bus, uint8_t address,  uint8_t index, uint8_t  *pdata);
 
 
 /**
@@ -271,6 +278,7 @@ int32_t VL53L0X_read_byte(uint8_t address,  uint8_t index, uint8_t  *pdata);
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index  - uint8_t register index value
  * @param  pdata  - pointer to uint16_t data value
@@ -279,7 +287,7 @@ int32_t VL53L0X_read_byte(uint8_t address,  uint8_t index, uint8_t  *pdata);
  *
  */
 
-int32_t VL53L0X_read_word(uint8_t address,  uint8_t index, uint16_t *pdata);
+int32_t VL53L0X_read_word(uint8_t bus, uint8_t address,  uint8_t index, uint16_t *pdata);
 
 
 /**
@@ -298,6 +306,7 @@ int32_t VL53L0X_read_word(uint8_t address,  uint8_t index, uint16_t *pdata);
  *
  * @endcode
  *
+ * @param  bus - Pico I2C controller: 0 (I2C0) or 1 (I2C1)
  * @param  address - uint8_t device address value
  * @param  index - uint8_t register index value
  * @param  pdata - pointer to uint32_t data value
@@ -306,7 +315,7 @@ int32_t VL53L0X_read_word(uint8_t address,  uint8_t index, uint16_t *pdata);
  *
  */
 
-int32_t VL53L0X_read_dword(uint8_t address, uint8_t index, uint32_t *pdata);
+int32_t VL53L0X_read_dword(uint8_t bus, uint8_t address, uint8_t index, uint32_t *pdata);
 
 
 /**
