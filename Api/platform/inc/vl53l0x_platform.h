@@ -62,6 +62,7 @@ typedef struct {
     uint8_t   I2cDevAddr;                /*!< i2c device address user specific field */
     uint8_t   comms_type;                /*!< Type of comms : VL53L0X_COMMS_I2C or VL53L0X_COMMS_SPI */
     uint16_t  comms_speed_khz;           /*!< Comms speed [kHz] : typically 400kHz for I2C           */
+    uint8_t   I2cBus;                    /*!< Pico I2C controller: 0 (I2C0) or 1 (I2C1) */
 
 } VL53L0X_Dev_t;
 

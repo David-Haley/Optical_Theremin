@@ -9,10 +9,11 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 3, spec in `Documents/Stage_3.md`; stage 2 in
-`Stage_2.md`): the sensor is polled at 20 Hz and its filtered distance sets
-the pitch; the waveform is selected by grounding one of four GPIO inputs; the
-DAC volume is fixed at 0 dB. USB serial carries diagnostic and error messages only — no
+Current state (stage 4, spec in `Documents/Stage_4.md`; earlier stages in
+`Stage_2.md`/`Stage_3.md`): two VL53L0X sensors are polled at 20 Hz. The
+pitch sensor's filtered distance sets the pitch, and the volume sensor's
+filtered distance sets the PCM5122 digital volume. The waveform is selected by
+grounding one of four GPIO inputs. USB serial carries diagnostic and error messages only — no
 distance readings. The CMake target is still `distance_measurement`, from
 the distance-measurement app the project grew from.
 
@@ -20,8 +21,9 @@ the distance-measurement app the project grew from.
 
 | Signal | Pin | GPIO | Peripheral |
 |---|---|---|---|
-| VL53L0X SDA / SCL | 1 / 2 | GP0 / GP1 | I2C0, addr 0x29 |
-| PCM5122 SDA / SCL | 4 / 5 | GP2 / GP3 | I2C1, addr 0x4D |
+| Pitch VL53L0X SDA / SCL | 1 / 2 | GP0 / GP1 | I2C0, addr 0x29, 400 kHz |
+| PCM5122 SDA / SCL | 4 / 5 | GP2 / GP3 | I2C1, addr 0x4D, 100 kHz |
+| Volume VL53L0X SDA / SCL | 4 / 5 | GP2 / GP3 | I2C1 (shared), addr 0x29 |
 | I2S DIN | 31 | GP26 | PIO0 |
 | I2S BCK | 26 | GP20 | PIO0 side-set |
 | I2S LRCK | 27 | GP21 | PIO0 side-set (must be BCK + 1) |
@@ -141,20 +143,39 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   files are part of the Pico build:
   - `src/vl53l0x_i2c_platform.c` — the actual I2C transport, rewritten
     against the Pico SDK's `hardware_i2c` (originally a Windows DLL-backed
-    implementation). I2C0 on GPIO0 (SDA) / GPIO1 (SCL) — physical header pins
-    1 and 2 — is hardcoded here via `VL53L0X_I2C_INSTANCE/_SDA_PIN/_SCL_PIN`.
+    implementation). Every function takes a leading `bus` argument that
+    indexes a table: 0 = I2C0 on GP0/GP1 (pins 1/2), 1 = I2C1 on GP2/GP3
+    (pins 4/5). Both sensors are at 0x29, but on different controllers.
+    Transfers use `i2c_*_timeout_us` (20 ms), not the blocking calls, and
+    `VL53L0X_comms_initialise` first clears a stuck bus: if SDA is low it
+    clocks SCL (up to 9 pulses) and sends a STOP, printing "I2Cn SDA was held
+    low". This is needed because a Pico reset (`picotool load -f`/`reboot`)
+    mid-transfer leaves the sensor holding SDA low. With blocking calls the
+    next boot hangs silently at "Initialising Volume VL53L0X...".
   - `src/vl53l0x_platform.c` — generic register read/write glue that calls
-    into `vl53l0x_i2c_platform.c`; only patched to replace one Windows-only
-    delay call with `sleep_ms()`.
+    into `vl53l0x_i2c_platform.c`, passing the device's bus from the
+    `I2cBus` field added to `VL53L0X_Dev_t` (`inc/vl53l0x_platform.h`). The
+    only other patch replaces one Windows-only delay call with `sleep_ms()`.
   - `src/vl53l0x_i2c_win_serial_comms.c` and `src/vl53l0x_platform_log.c` are
     the original Windows-only files, kept for reference but **not** listed in
     `CMakeLists.txt`'s sources — don't add them to the build.
-- `src/main.c` — application entry point: runs the VL53L0X init sequence,
-  starts the I2S output, initialises the PCM5122, then every 50 ms (20 Hz,
-  `sleep_until`) takes a single ranging measurement and passes the distance
-  through `filter_distance()` to `I2S_Output_Set_Distance()`. Out-of-range
-  or failed measurements feed `Lowest_Note_MM` into the filter. The filter
-  clamps to `Highest_Note_MM..Lowest_Note_MM`, takes a median of 3 (rejects
+- `src/main.c` — application entry point: runs the VL53L0X init sequence
+  (`init_sensor()`) for the pitch sensor and then the volume sensor, starts
+  the I2S output, initialises the PCM5122, then runs a loop every 50 ms
+  (20 Hz, `sleep_until`). Each loop starts a single ranging measurement on
+  both sensors and then collects both (`start_ranging()`/`finish_ranging()`,
+  the two halves of `VL53L0X_PerformSingleRangingMeasurement`). The sensors
+  range at the same time because two back-to-back ~33 ms measurements would
+  overrun the 50 ms period. The pitch distance goes through
+  `filter_distance()` to `I2S_Output_Set_Distance()`. Out-of-range or failed
+  pitch measurements feed `Lowest_Note_MM` into the filter. Valid volume
+  readings are first corrected by `correct_volume_range()` (see the
+  calibration notes below). The volume
+  distance goes through its own filter instance (clamped to 100..307 mm).
+  Out-of-range or failed readings feed 307. The PCM5122 volume code is
+  `distance − 52`: 100 mm → 48 (0 dB, the gain is capped there to avoid
+  clipping), 306 → 254 (−103 dB), 307 → 255 (mute). It is written with
+  `PCM5122_Set_Volume()` only when it changes. Each `struct distance_filter` clamps to its min..max, takes a median of 3 (rejects
   single spikes/dropouts), then an EMA with alpha = 1/2^`SMOOTHING_SHIFT`
   (1 → ~100 ms lag) in fixed point with 4 fractional bits. It also polls
   `Waveform_Select_Read()` each loop and prints the waveform on change. Measurement problems are printed only when the status
@@ -185,7 +206,9 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   §8.3.6.3); the I2S stream must already be running when `PCM5122_Init()`
   is called. Register sequence (page 0): standby → reset → PLL ref = BCK
   (0x0D=0x10) → ignore SCK detection/halt (0x25=0x18) → I2S 16-bit
-  (0x28=0x00) → volume 0 dB (0x3D/0x3E=0x30) → unmute → leave standby, then
+  (0x28=0x00) → volume −103 dB (0x3D/0x3E=0xFE, until the main loop sets it
+  from the volume sensor; starting at 0xFF, mute, leaves the DAC stuck in
+  power state 4, volume ramp up, and it never reaches Run) → unmute → leave standby, then
   wait for reg 118 power state 0x5 (Run). If the PLL doesn't lock it prints
   regs 4, 91, 94, 95 and 118 (PLL lock, detected FS, clock status/errors,
   power state). If the DAC doesn't acknowledge at all it prints the I2C1
@@ -205,8 +228,8 @@ used in `main.c`) is: `VL53L0X_comms_initialise` → `VL53L0X_DataInit` →
 `VL53L0X_StaticInit` → `VL53L0X_PerformRefCalibration` →
 `VL53L0X_PerformRefSpadManagement` → offset correction → `VL53L0X_SetDeviceMode`.
 
-This sensor's factory NVM part-to-part offset (125.5 mm) is wrong and made
-every reading far too long, so `main.c` replaces it with `RANGE_OFFSET_MM`
+The pitch sensor's factory NVM part-to-part offset (125.5 mm) is wrong and made
+every reading far too long, so `main.c` replaces it with `PITCH_RANGE_OFFSET_MM`
 (−16 mm, set so a flat card at 300 mm reads 300) via
 `VL53L0X_SetOffsetCalibrationDataMicroMeter`. The device adds the offset to
 each range, so positive = longer readings. Readings also appeared to be
@@ -214,6 +237,30 @@ scaled short (~0.84–0.89) but the 100/200 mm test points weren't held
 reliably, so no gain correction is applied. `VL53L0X_SetLinearityCorrectiveGain`
 can only scale down (max 1000/1000), so any future gain correction must be
 done in firmware.
+
+The volume sensor keeps its factory offset (`VOLUME_RANGE_OFFSET_MM` =
+`KEEP_FACTORY_OFFSET`, 46.5 mm on this part). Its error isn't a plain offset,
+so `correct_volume_range()` maps readings through a straight line between
+two measured points: a flat card at 100 mm read 126.2 mm, and at 300 mm read
+312.8 mm (`VOLUME_CAL_*`, in tenths of a mm). At 150 mm it read 165.4 mm, about
+8 mm true (4 dB) off the line; a third point would fix that if it's
+audible. The calibration was confirmed at 300 mm after a sensor power cycle
+and after a Pico reboot (both within 0.5 mm), and readings vary less than
+2 mm raw from boot to boot.
+
+An earlier calibration of the volume sensor was wrong because the sensor was
+in a bad state after wiring faults and a mid-write reset. It read about 0.60×
+true distance, and at one point it acknowledged its address but NACKed every
+data byte. Only a power cycle of the sensor fixes this, since XSHUT isn't
+wired. If readings suddenly jump, power-cycle the sensor before recalibrating.
+
+`init_sensor()` prints each sensor's offset at boot. The offset lives in a
+sensor register that survives a Pico reboot, so after a reflash without a
+power cycle the pitch sensor shows the −16 mm override, not its factory
+value. A pitch reading of about 125500 µm confirms the sensors really lost
+power. If the volume sensor doesn't answer, main.c prints
+an I2C1 idle-level check and bus scan (`PCM5122_Scan_Bus()`); a scan with
+only 0x4D means the sensor is miswired or unpowered.
 
 `RangeStatus` on a measurement is a sensor-reported quality code, not a
 plumbing error — e.g. status 4 (`PHASE_FAIL`) just means no target is in
