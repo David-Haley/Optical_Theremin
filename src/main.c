@@ -3,7 +3,9 @@
  * The pitch sensor (I2C0, GPIO0/GPIO1, header pins 1 and 2) sets the
  * frequency of the DDS tone generator, whose samples are streamed over I2S
  * to a PCM5122 DAC. The volume sensor shares I2C1 (GPIO2/GPIO3, header pins
- * 4 and 5) with the PCM5122 and sets its digital volume. The waveform is
+ * 4 and 5) with the PCM5122 and sets its digital volume. Readings are not
+ * filtered: the DDS generator ramps the pitch and the main loop ramps the
+ * volume between readings. The waveform is
  * selected by grounding one of header pins 14 to 17 (see waveform_select.h).
  * USB serial carries diagnostic and error messages only.
  */
@@ -69,21 +71,24 @@
 #define VOLUME_MUTE_MM      (VOLUME_LOUDEST_MM + PCM5122_Volume_Mute - VOLUME_LOUDEST_CODE)
 
 /*
- * Distance filter: a median of the last MEDIAN_LENGTH readings rejects
- * isolated spikes and dropouts, then an exponential moving average with
- * alpha = 1 / 2^SMOOTHING_SHIFT smooths the remaining jitter. Larger values
- * are steadier but slower to follow the hand: at 20 Hz, shift 1 lags about
- * 100 ms and shift 2 about 200 ms.
+ * Rather than jumping to each new volume, the PCM5122 is moved there in
+ * VOLUME_STEPS equal steps, one every VOLUME_STEP_MS, spreading the change
+ * over one poll period. The steps are written from the main loop, while it
+ * waits for a measurement or for the next poll, not from a timer interrupt:
+ * the PCM5122 shares I2C1 with the volume sensor, which may be mid-transfer.
  */
-#define MEDIAN_LENGTH   3
-#define SMOOTHING_SHIFT 1
-#define FILTER_FRACTION 4 /* fractional bits kept by the average */
+#define VOLUME_STEP_MS 2
+#define VOLUME_STEPS   (POLL_PERIOD_MS / VOLUME_STEP_MS)
 
-struct distance_filter {
-	int history[MEDIAN_LENGTH];
-	int next;
-	int filtered;
-	int min, max; /* readings are clamped to this range */
+_Static_assert(POLL_PERIOD_MS % VOLUME_STEP_MS == 0, "POLL_PERIOD_MS must be a multiple of VOLUME_STEP_MS");
+
+struct volume_ramp {
+	int start;   /* volume code at the start of the ramp */
+	int target;  /* volume code from the latest measurement */
+	int current; /* volume code last written to the PCM5122 */
+	int step;    /* steps taken so far, 0..VOLUME_STEPS */
+	absolute_time_t next_step;
+	bool write_ok;
 };
 
 /* A sensor and what was last reported about it. */
@@ -107,48 +112,36 @@ static void die_on_error(const char *name, const char *step, VL53L0X_Error statu
 	}
 }
 
-static int median3(int a, int b, int c)
+/* Starts a new ramp from the current volume to target. */
+static void volume_ramp_set(struct volume_ramp *r, int target)
 {
-	if (a > b) {
-		int t = a;
-		a = b;
-		b = t;
+	r->start = r->current;
+	r->target = target;
+	r->step = 0;
+	r->next_step = make_timeout_time_ms(VOLUME_STEP_MS);
+}
+
+/*
+ * Takes the next ramp step if it is due. Writes to the PCM5122 only when the
+ * volume code changes, and reports write failures only when they change.
+ */
+static void volume_ramp_service(struct volume_ramp *r)
+{
+	if (r->step >= VOLUME_STEPS || !time_reached(r->next_step))
+		return;
+	r->step++;
+	r->next_step = delayed_by_ms(r->next_step, VOLUME_STEP_MS);
+
+	int code = r->start + (r->target - r->start) * r->step / VOLUME_STEPS;
+	if (code == r->current)
+		return;
+	bool ok = PCM5122_Set_Volume((uint8_t)code);
+	if (ok)
+		r->current = code;
+	if (ok != r->write_ok) {
+		printf(ok ? "PCM5122 volume write recovered\n" : "PCM5122 volume write failed\n");
+		r->write_ok = ok;
 	}
-	/* now a <= b */
-	if (c < a)
-		return a;
-	if (c > b)
-		return b;
-	return c;
-}
-
-_Static_assert(MEDIAN_LENGTH == 3, "median3 expects MEDIAN_LENGTH == 3");
-
-/* Starts the filter at max, the far end. */
-static void filter_init(struct distance_filter *f, int min, int max)
-{
-	for (int i = 0; i < MEDIAN_LENGTH; i++)
-		f->history[i] = max;
-	f->next = 0;
-	f->filtered = max << FILTER_FRACTION;
-	f->min = min;
-	f->max = max;
-}
-
-static int filter_distance(struct distance_filter *f, int raw)
-{
-	/* Keep far out-of-range readings from dragging the average. */
-	if (raw < f->min)
-		raw = f->min;
-	else if (raw > f->max)
-		raw = f->max;
-
-	f->history[f->next] = raw;
-	f->next = (f->next + 1) % MEDIAN_LENGTH;
-
-	int median = median3(f->history[0], f->history[1], f->history[2]);
-	f->filtered += ((median << FILTER_FRACTION) - f->filtered) >> SMOOTHING_SHIFT;
-	return (f->filtered + (1 << (FILTER_FRACTION - 1))) >> FILTER_FRACTION;
 }
 
 static void init_sensor(struct sensor *s, uint8_t bus, uint16_t speed_khz, int32_t offset_mm)
@@ -204,7 +197,9 @@ static VL53L0X_Error start_ranging(struct sensor *s)
 	return VL53L0X_StartMeasurement(&s->device);
 }
 
-static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurementData_t *measurement)
+/* Keeps the volume ramp stepping while it waits. */
+static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurementData_t *measurement,
+				    struct volume_ramp *ramp)
 {
 	VL53L0X_DEV Dev = &s->device;
 	absolute_time_t timeout = make_timeout_time_ms(RANGING_TIMEOUT_MS);
@@ -214,6 +209,7 @@ static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurement
 	while ((status = VL53L0X_GetMeasurementDataReady(Dev, &ready)) == VL53L0X_ERROR_NONE && !ready) {
 		if (time_reached(timeout))
 			return VL53L0X_ERROR_TIME_OUT;
+		volume_ramp_service(ramp);
 		VL53L0X_PollingDelay(Dev);
 	}
 	PALDevDataSet(Dev, PalState, VL53L0X_STATE_IDLE);
@@ -230,13 +226,14 @@ static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurement
  * found nothing in range. Only reports a problem when it changes, so an
  * empty field of view doesn't print a line on every poll.
  */
-static bool read_range(struct sensor *s, VL53L0X_Error start_status, int *range_mm)
+static bool read_range(struct sensor *s, VL53L0X_Error start_status, int *range_mm,
+		       struct volume_ramp *ramp)
 {
 	VL53L0X_RangingMeasurementData_t measurement;
 	VL53L0X_Error status = start_status;
 
 	if (status == VL53L0X_ERROR_NONE)
-		status = finish_ranging(s, &measurement);
+		status = finish_ranging(s, &measurement, ramp);
 	uint8_t range_status = status == VL53L0X_ERROR_NONE ? measurement.RangeStatus : 0;
 
 	if (status != s->last_status || range_status != s->last_range_status) {
@@ -291,12 +288,14 @@ int main(void)
 	}
 	printf("PCM5122 running\n");
 
-	struct distance_filter pitch_filter, volume_filter;
-	filter_init(&pitch_filter, Highest_Note_MM, Lowest_Note_MM);
-	filter_init(&volume_filter, VOLUME_LOUDEST_MM, VOLUME_MUTE_MM);
-
-	int last_volume = PCM5122_Volume_Quietest; /* as set by PCM5122_Init() */
-	bool volume_write_ok = true;
+	/* PCM5122_Init() leaves the volume at PCM5122_Volume_Quietest. */
+	struct volume_ramp volume_ramp = {
+		.start = PCM5122_Volume_Quietest,
+		.target = PCM5122_Volume_Quietest,
+		.current = PCM5122_Volume_Quietest,
+		.step = VOLUME_STEPS,
+		.write_ok = true,
+	};
 
 	while (true) {
 		absolute_time_t next_poll = make_timeout_time_ms(POLL_PERIOD_MS);
@@ -304,27 +303,20 @@ int main(void)
 		VL53L0X_Error volume_start = start_ranging(&volume);
 
 		int pitch_mm;
-		if (!read_range(&pitch, pitch_start, &pitch_mm))
+		if (!read_range(&pitch, pitch_start, &pitch_mm, &volume_ramp))
 			pitch_mm = Lowest_Note_MM;
-		I2S_Output_Set_Distance(filter_distance(&pitch_filter, pitch_mm));
+		I2S_Output_Set_Distance(pitch_mm); /* DDS_Generator() clamps it */
 
 		int volume_mm;
-		if (read_range(&volume, volume_start, &volume_mm))
+		if (read_range(&volume, volume_start, &volume_mm, &volume_ramp))
 			volume_mm = correct_volume_range(volume_mm);
 		else
 			volume_mm = VOLUME_MUTE_MM;
-		int volume_code = filter_distance(&volume_filter, volume_mm) -
-				  VOLUME_LOUDEST_MM + VOLUME_LOUDEST_CODE;
-
-		if (volume_code != last_volume) {
-			bool ok = PCM5122_Set_Volume((uint8_t)volume_code);
-			if (ok)
-				last_volume = volume_code;
-			if (ok != volume_write_ok) {
-				printf(ok ? "PCM5122 volume write recovered\n" : "PCM5122 volume write failed\n");
-				volume_write_ok = ok;
-			}
-		}
+		if (volume_mm < VOLUME_LOUDEST_MM)
+			volume_mm = VOLUME_LOUDEST_MM;
+		else if (volume_mm > VOLUME_MUTE_MM)
+			volume_mm = VOLUME_MUTE_MM;
+		volume_ramp_set(&volume_ramp, volume_mm - VOLUME_LOUDEST_MM + VOLUME_LOUDEST_CODE);
 
 		Waveforms selected = Waveform_Select_Read();
 		if (selected != waveform) {
@@ -333,6 +325,13 @@ int main(void)
 			printf("Waveform %s\n", waveform_names[waveform]);
 		}
 
-		sleep_until(next_poll);
+		while (!time_reached(next_poll)) {
+			volume_ramp_service(&volume_ramp);
+			absolute_time_t wake = next_poll;
+			if (volume_ramp.step < VOLUME_STEPS &&
+			    absolute_time_diff_us(volume_ramp.next_step, wake) > 0)
+				wake = volume_ramp.next_step;
+			sleep_until(wake);
+		}
 	}
 }

@@ -4,8 +4,10 @@
 
 --  Author    : David Haley
 --  Created   : 18/09/2026
---  Last Edit : 26/09/2026
+--  Last Edit : 29/09/2026
 
+--  20260926 : Reduced range to five octaves. Define for Phase_Shift added
+--  to DDS_generator header file.
 --  20260926 : Header file generation added.
 --  20260925 : Revised Sin_2 waveform emulating vaccun tupe second order
 --  distortion f(Y) := 0.5 * Y ** 2 + 0.75 * Y - 0.25
@@ -35,16 +37,18 @@ procedure Optical_Theremin is
    subtype Angles is Unsigned_32;
 
    Name_and_Version : constant String :=
-   "Optical_Theremin configuration tool version 20260926";
+   "Optical_Theremin configuration tool version 20260929";
    Author : constant String := "Author : David Haley";
    Documentation : constant String := "../Documents/";
    Source : constant String := "../src/";
 
-   Sample_Rate : constant Reals := 44100.0; -- 44.1 khz
+   Sample_Rate : constant Reals := 44100.0; -- 44.1 khz;
    Step_Per_Hz : constant Reals := (Reals (Angles'Last) + 1.0) / Sample_Rate;
    A0 : constant Reals := 27.5;
-   Octaves : constant Positive := 8;
-   MM_per_Octave : constant Positive := 40; -- distance in mm to double frequency
+   A1 : constant Reals := A0 * 2.0;
+   A2 : constant Reals := A1 * 2.0;
+   Octaves : constant Positive := 5;
+   MM_per_Octave : constant Positive := 60; -- distance in mm to double frequency
    Highest_Note_MM : constant Positive := 60; -- distance for highest note in mm
    Lowest_Note_MM : constant Positive :=
      Highest_Note_MM + MM_per_Octave * Octaves;
@@ -60,7 +64,13 @@ procedure Optical_Theremin is
    use Step_IO;
    
    subtype Samples is Integer_16 range -Integer_16'Last .. Integer_16'Last;
-   Sample_Count : constant Unsigned_16 := 1024; -- Steps per cycle
+   Sample_Count : constant Unsigned_16 := 1024;
+   --  Steps per cycle, must be a power of two to allow to allow the table
+   --  Wave_Table index to be calculated by a by a right shift rather than a
+   --  devision. The constant Phase_Shift must be defined such that shifting an
+   --  Unsigned_32 to the right Power_Shift times results in a modumo
+   --  Sample_Count number.
+   Phase_Shift : constant Positive := 22;
    subtype Sample_Indices is Unsigned_16 range 0 .. Sample_Count - 1;
    type Waveforms is (Sine, Sine_2, Triangle, Square);
    type Sample_Arrays is array (Sample_Indices) of Samples;
@@ -81,7 +91,7 @@ procedure Optical_Theremin is
       for F in Frequency_Indices loop
          Frequency_Table (F).Frequency :=
          (Reals (2.0) ** (Reals (Lowest_Note_MM - F) / Reals (MM_per_Octave))
-         * A0);
+         * A1);
          Frequency_Table (F).Step :=
            Angles (Reals'Rounding (Frequency_Table (F).Frequency
            * Step_Per_Hz));
@@ -333,7 +343,8 @@ procedure Optical_Theremin is
       Put_Line (Output_File, "} Audio_Sample;");
       New_Line (Output_File);
       Comment ("This function returns a single sample of audio each time it");
-      Comment ("is called. The sample rate must be 44.1kHz. Waveform");
+      Comment ("is called. The sample rate must be" & Positive (Sample_Rate)'Img
+               & "Hz. Waveform");
       Comment ("specifies the type of waveform to be produced and Distance");
       Comment ("the frequency. The maximum frequency is produced at");
       Comment ("Highest_Note_MM and the minimum frequency is produced at");
@@ -377,7 +388,8 @@ procedure Optical_Theremin is
       Comment ("required range of the Wave_Table index. The first element");
       Comment ("of the array (index 0) corresponds to Highest_Note_MM");
       Comment ("and the last element corresponds to Lowest_Note_MM.");
-      Put (Output_File, "static const uint32_t __not_in_flash (""dds"") Phase_Step" &
+      Put (Output_File,
+           "static const uint32_t __not_in_flash (""dds"") Phase_Step" &
            " [Frequency_Count] = {");
       for F in Frequency_Indices loop
          if F mod 5 = 0 then
@@ -394,11 +406,18 @@ procedure Optical_Theremin is
          end if; -- F /= Frequency_Indices'Last
       end loop; -- F in Frequency_Indices
       New_Line (Output_File);
+      Put_Line (Output_File, "#define Sample_Count" & Sample_Count'Img );
+      Comment ("Length of the Wave_Table for each waveform.");
+      New_Line (Output_File);
+      Comment ("Number of bits the phase accumulator is shifted right to");
+      Comment ("produce a Wave_Table index, 32 - log2 (Wave_Table length).");
+      Put_Line (Output_File, "#define Phase_Shift" & Phase_Shift'Img);
+      New_Line (Output_File);
       Comment ("The table represents the instantaneous value for each");
       Comment ("waveform for each value of phase.");
-      Put_Line (Output_File, "static const int16_t __not_in_flash (""dds"") Wave_Table [" &
-                Trim (Waveform_Count'Img, Both) & "] [" &
-                Trim (Sample_Count'Img, Both) & "] = {");
+      Put_Line (Output_File,
+                "static const int16_t __not_in_flash (""dds"") Wave_Table [" &
+                Trim (Waveform_Count'Img, Both) & "] [Sample_Count] = {");
       for W in Waveforms loop
          Indent;
          Put (Output_File, '{'); 

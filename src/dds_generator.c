@@ -4,12 +4,11 @@
 // configuration tool (optical_theremin.adb).
 // Author : David Haley
 
+// 20260929 : Phase_Shift moved to automatically generated header file. Ramp
+// introduced smooth frequency transitions.
+
 #include "dds_generator.h"
 #include "dds_table.h"
-
-// Number of bits the phase accumulator is shifted right to
-// produce a Wave_Table index, 32 - log2 (Wave_Table length).
-#define Phase_Shift 22
 
 _Static_assert (sizeof (Wave_Table [0]) / sizeof (Wave_Table [0] [0]) ==
                   (1u << (32 - Phase_Shift)),
@@ -25,6 +24,28 @@ _Static_assert (Frequency_Count == Lowest_Note_MM - Highest_Note_MM + 1,
 // persists between calls, the waveform stays continuous (no
 // clicks) when Distance or Waveform changes.
 static uint32_t Phase = 0;
+
+// When Distance changes, the phase step glides linearly from its
+// current value to the new target over Ramp_Length samples, rather
+// than jumping. Ramping the phase step itself (not the distance in
+// whole mm) gives a smooth glide however small the change, and a new
+// target arriving mid-ramp starts from wherever the ramp has got to.
+// Ramp_Length is a power of two so the per-sample increment needs a
+// shift, not a division (the SDK divider routines are in flash).
+// 2^11 = 2048 samples = 46 ms, just under the 50 ms main loop period,
+// so a ramp normally completes before the next distance arrives.
+#define Ramp_Shift 11
+#define Ramp_Length (1 << Ramp_Shift)
+
+// Previous_Distance starts outside the clamped range so the first
+// call sets the target. Current_Step starts at 0, so at power up the
+// pitch glides up from 0 Hz over the first ramp (while the volume is
+// still at -103 dB).
+static int Previous_Distance = 0;
+static uint32_t Current_Step = 0;
+static uint32_t Target_Step = 0;
+static int32_t Step_Increment = 0;
+static int Ramp_Count = 0;
 
 Audio_Sample __time_critical_func (DDS_Generator) (
   const Waveforms Waveform,
@@ -42,8 +63,26 @@ Audio_Sample __time_critical_func (DDS_Generator) (
   if ((unsigned) Selected_Waveform > (unsigned) Square) {
     Selected_Waveform = Sine;
   } // (unsigned) Selected_Waveform > (unsigned) Square
+  if (Clamped_Distance != Previous_Distance) {
+    Previous_Distance = Clamped_Distance;
+    Target_Step = Phase_Step [Clamped_Distance - Highest_Note_MM];
+    Step_Increment =
+      (int32_t) (Target_Step - Current_Step) >> Ramp_Shift;
+    Ramp_Count = Ramp_Length;
+  } // Clamped_Distance != Previous_Distance
+  if (Ramp_Count > 0) {
+    Ramp_Count--;
+    if (Ramp_Count == 0) {
+      // Land exactly on the target, discarding the truncation error
+      // accumulated from the shifted increment.
+      Current_Step = Target_Step;
+    } else {
+      Current_Step += (uint32_t) Step_Increment;
+    } // Ramp_Count == 0
+  } // Ramp_Count > 0
+
   Sample.Left = Wave_Table [Selected_Waveform] [Phase >> Phase_Shift];
   Sample.Right = Sample.Left;
-  Phase += Phase_Step [Clamped_Distance - Highest_Note_MM];
+  Phase += Current_Step;
   return Sample;
 } // DDS_Generator
