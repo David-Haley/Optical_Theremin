@@ -9,13 +9,15 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 4, spec in `Documents/Stage_4.md`; earlier stages in
-`Stage_2.md`/`Stage_3.md`): two VL53L0X sensors are polled at 20 Hz. The
-pitch sensor's filtered distance sets the pitch, and the volume sensor's
-filtered distance sets the PCM5122 digital volume. The waveform is selected by
-grounding one of four GPIO inputs. USB serial carries diagnostic and error messages only — no
-distance readings. The CMake target is still `distance_measurement`, from
-the distance-measurement app the project grew from.
+Current state (stage 5, spec in `Documents/stage_5.md`; earlier stages in
+`Stage_2.md`–`Stage_4.md`): two VL53L0X sensors are polled at 20 Hz. The
+pitch sensor's distance sets the pitch and the volume sensor's distance sets
+the PCM5122 digital volume. Readings are not filtered; instead the DDS
+generator ramps the pitch and the main loop ramps the volume between
+readings. The waveform is selected by grounding one of four GPIO inputs. USB
+serial carries diagnostic and error messages only — no distance readings.
+The CMake target is `optical_theremin` (it was `distance_measurement`, from
+the distance-measurement app the project grew from).
 
 ### Pins (Pico physical pin → GPIO)
 
@@ -62,12 +64,12 @@ If the project directory has been moved or renamed, delete `build/` and
 configure from scratch: CMake caches absolute paths, and a stale cache will
 silently compile against include paths from the old location.
 
-Output: `build/distance_measurement.uf2` and `.elf`.
+Output: `build/optical_theremin.uf2` and `.elf`.
 
 ## Flash and monitor
 
 ```bash
-picotool load -f -v -x build/distance_measurement.uf2
+picotool load -f -v -x build/optical_theremin.uf2
 ```
 
 `-f` forces a device that's already running application code (exposing a USB
@@ -102,8 +104,8 @@ It writes:
 - `../src/dds_generator.h` — public interface: `Sample_Rate`,
   `Highest_Note_MM`, `Lowest_Note_MM`, the `Waveforms` enum, the
   `Audio_Sample` struct and the `DDS_Generator()` prototype.
-- `../src/dds_table.h` — `Frequency_Count`, `Phase_Step[]` and
-  `Wave_Table[][]`.
+- `../src/dds_table.h` — `Frequency_Count`, `Phase_Step[]`,
+  `Sample_Count`, `Phase_Shift` and `Wave_Table[][]`.
 - `../Documents/Frequency.csv` and `../Documents/Sample.csv` — the same data
   for inspection/plotting (`Documents/` is git-ignored except the VL53L0X PDF).
 
@@ -115,13 +117,22 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
 
 - Sample rate 44.1 kHz; `DDS_Generator()` returns one stereo `Audio_Sample`
   per call.
-- Pitch: A0 (27.5 Hz) up 8 octaves to 7040 Hz, 40 mm per octave
+- Pitch: A1 (55 Hz) up 5 octaves to 1760 Hz, 60 mm per octave
   (exponential in distance). Highest note at `Highest_Note_MM` (60 mm),
-  lowest at `Lowest_Note_MM` (380 mm). Out-of-range distances clamp to the
+  lowest at `Lowest_Note_MM` (360 mm). Out-of-range distances clamp to the
   nearest end.
 - `Phase_Step[]` is a 32-bit phase increment per sample, indexed by
   `Distance - Highest_Note_MM` (index 0 = highest note). Accumulate into a
-  `uint32_t` phase; `phase >> 22` gives the 10-bit `Wave_Table` index.
+  `uint32_t` phase; `phase >> Phase_Shift` (22) gives the 10-bit
+  `Wave_Table` index (`Sample_Count` = 1024).
+- Pitch ramp (hand-written in `dds_generator.c`): when the distance changes,
+  the phase step glides linearly from its current value to the new
+  `Phase_Step[]` entry over 2048 samples (46 ms, just under the 50 ms poll
+  period), landing exactly on the target. The ramp is on the phase step, not
+  the distance in whole mm (1 mm = 1/60 octave would step audibly), and a new
+  target mid-ramp starts from wherever the ramp is. The per-sample increment
+  uses a shift, not a division: the SDK's divide routines are in flash, and
+  `DDS_Generator` must make no calls out of RAM (check with `objdump`).
 - `Wave_Table[Waveforms][1024]` holds one cycle of each waveform as
   `int16_t`: `Sine`, `Sine_2` (sine through `0.5*Y^2 + 0.75*Y - 0.25`,
   emulating vacuum-tube second-order distortion), `Triangle`, `Square`. All
@@ -162,22 +173,26 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
 - `src/main.c` — application entry point: runs the VL53L0X init sequence
   (`init_sensor()`) for the pitch sensor and then the volume sensor, starts
   the I2S output, initialises the PCM5122, then runs a loop every 50 ms
-  (20 Hz, `sleep_until`). Each loop starts a single ranging measurement on
+  (20 Hz). Each loop starts a single ranging measurement on
   both sensors and then collects both (`start_ranging()`/`finish_ranging()`,
   the two halves of `VL53L0X_PerformSingleRangingMeasurement`). The sensors
   range at the same time because two back-to-back ~33 ms measurements would
-  overrun the 50 ms period. The pitch distance goes through
-  `filter_distance()` to `I2S_Output_Set_Distance()`. Out-of-range or failed
-  pitch measurements feed `Lowest_Note_MM` into the filter. Valid volume
-  readings are first corrected by `correct_volume_range()` (see the
-  calibration notes below). The volume
-  distance goes through its own filter instance (clamped to 100..307 mm).
-  Out-of-range or failed readings feed 307. The PCM5122 volume code is
-  `distance − 52`: 100 mm → 48 (0 dB, the gain is capped there to avoid
-  clipping), 306 → 254 (−103 dB), 307 → 255 (mute). It is written with
-  `PCM5122_Set_Volume()` only when it changes. Each `struct distance_filter` clamps to its min..max, takes a median of 3 (rejects
-  single spikes/dropouts), then an EMA with alpha = 1/2^`SMOOTHING_SHIFT`
-  (1 → ~100 ms lag) in fixed point with 4 fractional bits. It also polls
+  overrun the 50 ms period. The pitch distance goes straight to `I2S_Output_Set_Distance()` (the DDS
+  generator clamps and ramps it). Out-of-range or failed pitch measurements
+  send `Lowest_Note_MM`. Valid volume readings are first corrected by
+  `correct_volume_range()` (see the calibration notes below), then clamped
+  to 100..307 mm. Out-of-range or failed readings give 307. The PCM5122
+  volume code is `distance − 52`: 100 mm → 48 (0 dB, the gain is capped
+  there to avoid clipping), 306 → 254 (−103 dB), 307 → 255 (mute). There is
+  no distance filter (removed in stage 5), so single-reading spikes and
+  dropouts are not rejected. Instead `struct volume_ramp` moves the DAC to
+  each new code in `VOLUME_STEPS` (5) linear steps, one every
+  `VOLUME_STEP_MS` (10 ms), starting from the code last written.
+  `PCM5122_Set_Volume()` is called only when the code changes. The steps are
+  taken by `volume_ramp_service()` from the main thread — inside
+  `finish_ranging()`'s data-ready polling loop and while waiting for the next
+  poll — not from a timer IRQ, because the PCM5122 shares I2C1 with the
+  volume sensor. It also polls
   `Waveform_Select_Read()` each loop and prints the waveform on change. Measurement problems are printed only when the status
   changes (`pico_enable_stdio_usb` is on, UART stdio is off).
 - `src/dds_generator.c` — `DDS_Generator()`, see the DDS design above.
