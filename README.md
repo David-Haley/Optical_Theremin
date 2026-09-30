@@ -15,7 +15,7 @@ to a PCM5122 DAC, and the other sets the DAC's volume.
 
 Both sensors are read 20 times a second. Rather than jumping at each
 reading, the pitch glides to its new value over about 46 ms and the volume
-over 50 ms (in 10 ms steps), so the sound follows the hands smoothly.
+over 50 ms (in 2 ms steps), so the sound follows the hands smoothly.
 
 ## Hardware
 

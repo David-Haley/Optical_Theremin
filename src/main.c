@@ -77,7 +77,7 @@
  * waits for a measurement or for the next poll, not from a timer interrupt:
  * the PCM5122 shares I2C1 with the volume sensor, which may be mid-transfer.
  */
-#define VOLUME_STEP_MS 10
+#define VOLUME_STEP_MS 2
 #define VOLUME_STEPS   (POLL_PERIOD_MS / VOLUME_STEP_MS)
 
 _Static_assert(POLL_PERIOD_MS % VOLUME_STEP_MS == 0, "POLL_PERIOD_MS must be a multiple of VOLUME_STEP_MS");

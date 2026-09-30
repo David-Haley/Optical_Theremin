@@ -186,8 +186,8 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   there to avoid clipping), 306 → 254 (−103 dB), 307 → 255 (mute). There is
   no distance filter (removed in stage 5), so single-reading spikes and
   dropouts are not rejected. Instead `struct volume_ramp` moves the DAC to
-  each new code in `VOLUME_STEPS` (5) linear steps, one every
-  `VOLUME_STEP_MS` (10 ms), starting from the code last written.
+  each new code in `VOLUME_STEPS` (25) linear steps, one every
+  `VOLUME_STEP_MS` (2 ms), starting from the code last written.
   `PCM5122_Set_Volume()` is called only when the code changes. The steps are
   taken by `volume_ramp_service()` from the main thread — inside
   `finish_ranging()`'s data-ready polling loop and while waiting for the next
