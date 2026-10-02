@@ -16,10 +16,11 @@
 struct settings {
 	Waveforms waveform;
 	int brightness_level; /* 1 .. Brightness_Levels */
-	/* Future: range */
+	int octave_shift;     /* Lowest_Octave_Shift .. Highest_Octave_Shift */
 };
 
-#define DEFAULT_SETTINGS { .waveform = Sine, .brightness_level = Default_Brightness_Level }
+#define DEFAULT_SETTINGS { .waveform = Sine, .brightness_level = Default_Brightness_Level, \
+			   .octave_shift = 0 }
 
 // Indexed by Waveforms.
 extern const char *const Waveform_Names [];
@@ -27,6 +28,10 @@ extern const char *const Waveform_Names [];
 // Returns the backlight PWM value for brightness Level, 1 .. 16, each
 // level a half stop (x 1.41) brighter than the one below.
 uint8_t Brightness_PWM (int Level);
+
+// Writes the range for Octave_Shift, for example "A1 to A6", to Text
+// (at least DFR0555_Columns characters).
+void Range_Name (int Octave_Shift, char *Text, int Size);
 
 // Mutes the audio and runs the menu until Play is selected. The
 // menu starts with Play selected.

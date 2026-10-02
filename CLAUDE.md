@@ -9,12 +9,13 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 7, spec in `Documents/Stage_7.md`; earlier stages in
-`Stage_2.md`–`Stage_6.md`): at boot a DFR0555 2×16 display shows the
+Current state (stage 8, spec in `Documents/Stage_8.md`; earlier stages in
+`Stage_2.md`–`Stage_7.md`): at boot a DFR0555 2×16 display shows the
 program name and build date, then a menu driven by a rotary encoder with a
-push switch sets the backlight brightness and waveform. Selecting Play
+push switch sets the backlight brightness, waveform and octave range (the
+five-octave span starts from A0, A1 or A2; A1 at start-up). Selecting Play
 starts the theremin and a push returns to the menu (silent). Settings are
-not saved. A Range (octave) menu item is planned. In play, two VL53L0X
+not saved. In play, two VL53L0X
 sensors are polled at 20 Hz. The
 pitch sensor's distance sets the pitch and the volume sensor's distance sets
 a gain applied inside the DDS generator; the PCM5122 volume is fixed at
@@ -122,7 +123,9 @@ It writes:
 
 - `../src/dds_generator.h` — public interface: `PIO_Clock_Divisor`,
   `Sample_Rate`, `Sample_Size`, `Highest_Note_MM`, `Lowest_Note_MM`,
-  `Loud_MM`, `Mute_MM`, the `Waveforms` enum, the `Audio_Sample` struct and
+  `Loud_MM`, `Mute_MM`, `Lowest_Octave_Shift` (−1, written `(-1)`),
+  `Highest_Octave_Shift` (1), `Lowest_Note_Octave` (1, A1 at shift 0),
+  `Octave_Count` (5), the `Waveforms` enum, the `Audio_Sample` struct and
   the `DDS_Generator()` prototype. `Sample_Rate` is a floating point
   literal; don't use it in firmware (soft float), use `PIO_Clock_Divisor`.
 - `../src/dds_table.h` — `Frequency_Count`, `Phase_Step[]`,
@@ -143,12 +146,18 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   fractional-divider jitter, and the sample rate follows from it (the tool
   computes `Phase_Step[]` from it, so notes are in tune). This assumes a
   125 MHz system clock; `main.c` halts at boot if `clk_sys` differs.
-- `DDS_Generator(Waveform, Tone_Distance, Volume_Distance)` returns one
-  stereo `Audio_Sample` (two `int32_t`) per call.
+- `DDS_Generator(Waveform, Tone_Distance, Volume_Distance, Octave_Shift)`
+  returns one stereo `Audio_Sample` (two `int32_t`) per call.
 - Pitch: A1 (55 Hz) up 5 octaves to 1760 Hz, 60 mm per octave
   (exponential in distance). Highest note at `Highest_Note_MM` (60 mm),
   lowest at `Lowest_Note_MM` (360 mm). Out-of-range distances clamp to the
   nearest end.
+- Range: `Octave_Shift` (clamped to `Lowest_Octave_Shift` ..
+  `Highest_Octave_Shift`) shifts the `Phase_Step[]` entry left (up) or
+  right (down), so A0–A5, A1–A6 and A2–A7 share one table. A change of
+  shift starts the pitch ramp like a change of distance. The pitch ramp
+  takes the difference of two steps as `int32_t`, so the tool refuses to
+  generate if the highest shifted step is ≥ 2^31.
 - `Phase_Step[]` is a 32-bit phase increment per sample, indexed by
   `Distance - Highest_Note_MM` (index 0 = highest note). Accumulate into a
   `uint32_t` phase; `phase >> Phase_Shift` (22) gives the 10-bit
@@ -213,13 +222,14 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
     `CMakeLists.txt`'s sources — don't add them to the build.
 - `src/main.c` — application entry point. After the 2 s USB delay it
   initialises I2C0 (`VL53L0X_comms_initialise`, which also clears a stuck
-  bus) and the display, and shows the start-up screen for at least 2 s
+  bus) and the display, and shows the start-up screen for at least 10 s (`SPLASH_MS`)
   while it checks the 125 MHz clock, runs the VL53L0X init sequence
   (`init_sensor()`) for the pitch sensor and then the volume sensor, starts
   the I2S output, initialises the PCM5122 and starts the encoder. Fatal
   errors are printed on USB serial and shown on display line 2 (`fatal()`).
   It then alternates `Menu_Run()` and `play()`. `play()` sets the
-  waveform, shows its name on line 1 (line 2 is reserved for Range) and
+  waveform and octave shift, shows the waveform on line 1 and
+  "Range A1 to A6" (from `Range_Name()`) on line 2, and
   runs a loop every 50 ms
   (20 Hz) until the encoder is pushed, then mutes. Each loop starts a single ranging measurement on
   both sensors and then collects both (`start_ranging()`/`finish_ranging()`,
@@ -255,15 +265,19 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   SN3193 backlight at 0x6B (OUT1 only, PWM register 0x04). The SN3193
   current is 10 mA (`Documents/SN3193.pdf` table 6). At the Ada's
   17.5 mA the LCD washed out above about half PWM. Failures are printed on
-  USB serial only when the state changes and never stop the theremin.
+  USB serial only when the state changes and never stop the theremin. If
+  `DFR0555_Init()` fails (it once got a NACK just after a flash), the next
+  `DFR0555_Put_Line()` retries it first: the LCD powers up with the display
+  off, so a later write alone would show nothing.
 - `src/menu.c` — `Menu_Run()` mutes the audio, then polls the encoder every
-  10 ms. Items Play, Brightness and Waveform are rows in the `Items` table
-  (name, value formatter, edit handler); adding Range means one row and one
-  field in `struct settings`. Turning moves between items (wrapping), a
+  10 ms. Items Play, Brightness, Waveform and Range are rows in the
+  `Items` table (name, value formatter, edit handler); a new item is one
+  row and one field in `struct settings`. Turning moves between items (wrapping), a
   push on Play returns, and a push on any other item edits it. While
   editing, turning changes the value and a push confirms. `>` marks what
   turning changes. Brightness has 16 half-stop levels (PWM 1…255, default
-  8), applied live and stopping at the ends. The display is rewritten only
+  8), applied live and stopping at the ends. Range also stops at the ends;
+  Waveform wraps. The display is rewritten only
   when a line changes.
 - `src/audio_i2s.pio` — 8-instruction I2S transmitter: 32-bit stereo,
   64 BCK per frame (BCK = 2.841 MHz), 2 PIO cycles per bit, integer clock

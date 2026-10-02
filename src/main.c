@@ -38,7 +38,7 @@
 #define POLL_PERIOD_MS        50 /* 20 Hz */
 /* PIO_Clock_Divisor and the Phase_Step table assume this system clock. */
 #define SYSTEM_CLOCK_HZ       125000000
-#define SPLASH_MS             2000
+#define SPLASH_MS             10000 /* minimum time the start-up screen is shown */
 
 /*
  * Longest wait for a measurement, about twice the default 33 ms timing
@@ -217,9 +217,16 @@ static int correct_volume_range(int raw_mm)
  */
 static void play(const struct settings *settings, struct sensor *pitch, struct sensor *volume)
 {
+	char range[DFR0555_Columns + 1];
+	char line[DFR0555_Columns + 1];
+
+	Range_Name(settings->octave_shift, range, sizeof(range));
 	I2S_Output_Set_Waveform(settings->waveform);
+	I2S_Output_Set_Octave_Shift(settings->octave_shift);
 	DFR0555_Put_Line(0, Waveform_Names[settings->waveform]);
-	DFR0555_Put_Line(1, ""); /* reserved for Range */
+	snprintf(line, sizeof(line), "Range %s", range);
+	DFR0555_Put_Line(1, line);
+	printf("Play, waveform %s, range %s\n", Waveform_Names[settings->waveform], range);
 	Encoder_Flush();
 
 	while (!Encoder_Take_Press()) {
@@ -287,7 +294,6 @@ int main(void)
 
 	while (true) {
 		Menu_Run(&settings);
-		printf("Play, waveform %s\n", Waveform_Names[settings.waveform]);
 		play(&settings, &pitch, &volume);
 		printf("Menu\n");
 	}

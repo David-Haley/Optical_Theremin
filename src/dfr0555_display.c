@@ -40,6 +40,11 @@ static const uint8_t Line_Address [DFR0555_Lines] = {0x00, 0x40};
 #define LED_OUT1_Only     0x01
 
 static bool Last_OK = true;
+// False until DFR0555_Init succeeds. If it fails (for example a NACK
+// just after a reset) DFR0555_Put_Line retries it, as the LCD powers
+// up with the display off and a later write alone would not show.
+static bool Initialised = false;
+static uint8_t Init_Brightness;
 
 // Reports a change between working and failing.
 static bool Check (bool OK, const char *Operation) {
@@ -72,7 +77,10 @@ static bool LED_Write (uint8_t Register, uint8_t Value) {
 } // LED_Write
 
 bool DFR0555_Init (uint8_t Brightness) {
-  bool OK = LCD_Command (LCD_Function) &&
+  bool OK;
+
+  Init_Brightness = Brightness;
+  OK = LCD_Command (LCD_Function) &&
             LCD_Command (LCD_On) &&
             LCD_Command (LCD_Entry);
 
@@ -84,10 +92,12 @@ bool DFR0555_Init (uint8_t Brightness) {
        LED_Write (LED_PWM_1, Brightness) &&
        LED_Write (LED_Control, LED_OUT1_Only) &&
        LED_Write (LED_PWM_Update, 0);
-  return Check (OK, "SN3193 (0x6B) initialisation");
+  Initialised = Check (OK, "SN3193 (0x6B) initialisation");
+  return Initialised;
 } // DFR0555_Init
 
 bool DFR0555_Set_Brightness (uint8_t Brightness) {
+  Init_Brightness = Brightness;
   return Check (LED_Write (LED_PWM_1, Brightness) &&
                 LED_Write (LED_PWM_Update, 0), "SN3193 brightness");
 } // DFR0555_Set_Brightness
@@ -99,6 +109,9 @@ bool DFR0555_Put_Line (int Line, const char *Text) {
   if (Line < 0 || Line >= DFR0555_Lines) {
     return false;
   } // Line out of range
+  if (!Initialised && !DFR0555_Init (Init_Brightness)) {
+    return false;
+  } // !Initialised && !DFR0555_Init (Init_Brightness)
   Data [0] = LCD_Data;
   for (size_t C = 0; C < DFR0555_Columns; C++) {
     Data [C + 1] = C < Length ? (uint8_t) Text [C] : (uint8_t) ' ';
