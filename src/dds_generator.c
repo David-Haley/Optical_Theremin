@@ -6,6 +6,8 @@
 
 // 20260929 : Phase_Shift moved to automatically generated header file. Ramp
 // introduced smooth frequency transitions.
+// 20261002 : 32 bit samples. Volume applied by a gain from Volume_Table,
+// ramped in the same way as the frequency.
 
 #include "dds_generator.h"
 #include "dds_table.h"
@@ -18,6 +20,8 @@ _Static_assert (sizeof (Wave_Table) / sizeof (Wave_Table [0]) ==
                 "Wave_Table does not have one row per waveform");
 _Static_assert (Frequency_Count == Lowest_Note_MM - Highest_Note_MM + 1,
                 "Phase_Step does not cover Highest_Note_MM .. Lowest_Note_MM");
+_Static_assert (Volume_Count == Mute_MM - Loud_MM + 1,
+                "Volume_Table does not cover Loud_MM .. Mute_MM");
 
 // The phase accumulator is a 32 bit fixed point fraction of a
 // cycle. It wraps naturally at the end of each cycle. Because it
@@ -25,7 +29,7 @@ _Static_assert (Frequency_Count == Lowest_Note_MM - Highest_Note_MM + 1,
 // clicks) when Distance or Waveform changes.
 static uint32_t Phase = 0;
 
-// When Distance changes, the phase step glides linearly from its
+// When Tone_Distance changes, the phase step glides linearly from its
 // current value to the new target over Ramp_Length samples, rather
 // than jumping. Ramping the phase step itself (not the distance in
 // whole mm) gives a smooth glide however small the change, and a new
@@ -39,19 +43,48 @@ static uint32_t Phase = 0;
 
 // Previous_Distance starts outside the clamped range so the first
 // call sets the target. Current_Step starts at 0, so at power up the
-// pitch glides up from 0 Hz over the first ramp (while the volume is
-// still at -103 dB).
+// pitch glides up from 0 Hz over the first ramp (while the gain is
+// also ramping up from 0).
 static int Previous_Distance = 0;
 static uint32_t Current_Step = 0;
 static uint32_t Target_Step = 0;
 static int32_t Step_Increment = 0;
 static int Ramp_Count = 0;
 
+// The gain is ramped in the same way as the phase step, so a change
+// of volume is spread over Ramp_Length samples rather than heard as
+// a step. Gains are Q31, 0 .. 2^31 - 1, so the difference between two
+// gains always fits in an int32_t.
+static int Previous_Volume_Distance = 0;
+static int32_t Current_Gain = 0;
+static int32_t Target_Gain = 0;
+static int32_t Gain_Increment = 0;
+static int Gain_Ramp_Count = 0;
+
+// Returns Sample x Gain / 2^31. The Cortex-M0+ only has a 32 x 32 -> 32
+// bit multiply, and a 64 bit product would call a library routine in
+// flash, so the product is formed from three 16 x 16 bit partial
+// products, none of which overflow. The low x low product is less than
+// one LSB of the result and is ignored, the result is within 3 LSB of
+// exact.
+static inline int32_t Apply_Gain (const int32_t Sample, const int32_t Gain) {
+  const int32_t Sample_High = Sample >> 16;
+  const uint32_t Sample_Low = (uint32_t) Sample & 0xFFFFu;
+  const int32_t Gain_High = Gain >> 16;
+  const int32_t Gain_Low = Gain & 0xFFFF;
+
+  return 2 * (Sample_High * Gain_High) +
+         ((Sample_High * Gain_Low) >> 15) +
+         (int32_t) ((Sample_Low * (uint32_t) Gain_High) >> 15);
+} // Apply_Gain
+
 Audio_Sample __time_critical_func (DDS_Generator) (
   const Waveforms Waveform,
-  const int Distance
+  const int Tone_Distance,
+  const int Volume_Distance
 ) {
-  int Clamped_Distance = Distance;
+  int Clamped_Distance = Tone_Distance;
+  int Clamped_Volume_Distance = Volume_Distance;
   Waveforms Selected_Waveform = Waveform;
   Audio_Sample Sample;
 
@@ -81,7 +114,28 @@ Audio_Sample __time_critical_func (DDS_Generator) (
     } // Ramp_Count == 0
   } // Ramp_Count > 0
 
-  Sample.Left = Wave_Table [Selected_Waveform] [Phase >> Phase_Shift];
+  if (Clamped_Volume_Distance < Loud_MM) {
+    Clamped_Volume_Distance = Loud_MM;
+  } else if (Clamped_Volume_Distance > Mute_MM) {
+    Clamped_Volume_Distance = Mute_MM;
+  } // Clamped_Volume_Distance < Loud_MM
+  if (Clamped_Volume_Distance != Previous_Volume_Distance) {
+    Previous_Volume_Distance = Clamped_Volume_Distance;
+    Target_Gain = Volume_Table [Clamped_Volume_Distance - Loud_MM];
+    Gain_Increment = (Target_Gain - Current_Gain) >> Ramp_Shift;
+    Gain_Ramp_Count = Ramp_Length;
+  } // Clamped_Volume_Distance != Previous_Volume_Distance
+  if (Gain_Ramp_Count > 0) {
+    Gain_Ramp_Count--;
+    if (Gain_Ramp_Count == 0) {
+      Current_Gain = Target_Gain;
+    } else {
+      Current_Gain += Gain_Increment;
+    } // Gain_Ramp_Count == 0
+  } // Gain_Ramp_Count > 0
+
+  Sample.Left = Apply_Gain (
+    Wave_Table [Selected_Waveform] [Phase >> Phase_Shift], Current_Gain);
   Sample.Right = Sample.Left;
   Phase += Current_Step;
   return Sample;

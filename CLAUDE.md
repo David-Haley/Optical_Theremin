@@ -9,12 +9,17 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 5, spec in `Documents/stage_5.md`; earlier stages in
-`Stage_2.md`–`Stage_4.md`): two VL53L0X sensors are polled at 20 Hz. The
+Current state (stage 6, spec in `Documents/Stage_6.md`; earlier stages in
+`Stage_2.md`–`stage_5.md`): two VL53L0X sensors are polled at 20 Hz. The
 pitch sensor's distance sets the pitch and the volume sensor's distance sets
-the PCM5122 digital volume. Readings are not filtered; instead the DDS
-generator ramps the pitch and the main loop ramps the volume between
-readings. The waveform is selected by grounding one of four GPIO inputs. USB
+a gain applied inside the DDS generator; the PCM5122 volume is fixed at
+0 dB. Readings are not filtered; instead the DDS generator ramps both the
+pitch and the gain between readings, sample by sample. Stage 5 stepped the
+PCM5122 volume over I2C instead, which crackled on fast hand movements.
+What was built differs from `Stage_6.md` in places: the gain table is
+indexed by distance (100–355 mm, 0.4 dB per mm), not by PCM5122 volume
+code, and the wave table is 32 bit.
+The waveform is selected by grounding one of four GPIO inputs. USB
 serial carries diagnostic and error messages only — no distance readings.
 The CMake target is `optical_theremin` (it was `distance_measurement`, from
 the distance-measurement app the project grew from).
@@ -101,12 +106,16 @@ cd bin && ./optical_theremin           # must run from bin/: output paths are re
 
 It writes:
 
-- `../src/dds_generator.h` — public interface: `Sample_Rate`,
-  `Highest_Note_MM`, `Lowest_Note_MM`, the `Waveforms` enum, the
-  `Audio_Sample` struct and the `DDS_Generator()` prototype.
+- `../src/dds_generator.h` — public interface: `PIO_Clock_Divisor`,
+  `Sample_Rate`, `Sample_Size`, `Highest_Note_MM`, `Lowest_Note_MM`,
+  `Loud_MM`, `Mute_MM`, the `Waveforms` enum, the `Audio_Sample` struct and
+  the `DDS_Generator()` prototype. `Sample_Rate` is a floating point
+  literal; don't use it in firmware (soft float), use `PIO_Clock_Divisor`.
 - `../src/dds_table.h` — `Frequency_Count`, `Phase_Step[]`,
-  `Sample_Count`, `Phase_Shift` and `Wave_Table[][]`.
-- `../Documents/Frequency.csv` and `../Documents/Sample.csv` — the same data
+  `Sample_Count`, `Phase_Shift`, `Wave_Table[][]`, `Volume_Count` and
+  `Volume_Table[]`.
+- `../Documents/Frequency.csv`, `../Documents/Sample.csv` and
+  `../Documents/Volume.csv` — the same data
   for inspection/plotting (`Documents/` is git-ignored except the VL53L0X PDF).
 
 **`dds_generator.h` and `dds_table.h` are machine-generated and committed.**
@@ -115,8 +124,13 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
 
 ### DDS design (encoded in the generator)
 
-- Sample rate 44.1 kHz; `DDS_Generator()` returns one stereo `Audio_Sample`
-  per call.
+- Sample rate 44389.2 Hz = 125 MHz / (`PIO_Clock_Divisor` 22 × 64 BCK ×
+  2 PIO cycles per bit). The divider is an exact integer to avoid
+  fractional-divider jitter, and the sample rate follows from it (the tool
+  computes `Phase_Step[]` from it, so notes are in tune). This assumes a
+  125 MHz system clock; `main.c` halts at boot if `clk_sys` differs.
+- `DDS_Generator(Waveform, Tone_Distance, Volume_Distance)` returns one
+  stereo `Audio_Sample` (two `int32_t`) per call.
 - Pitch: A1 (55 Hz) up 5 octaves to 1760 Hz, 60 mm per octave
   (exponential in distance). Highest note at `Highest_Note_MM` (60 mm),
   lowest at `Lowest_Note_MM` (360 mm). Out-of-range distances clamp to the
@@ -134,12 +148,25 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   uses a shift, not a division: the SDK's divide routines are in flash, and
   `DDS_Generator` must make no calls out of RAM (check with `objdump`).
 - `Wave_Table[Waveforms][1024]` holds one cycle of each waveform as
-  `int16_t`: `Sine`, `Sine_2` (sine through `0.5*Y^2 + 0.75*Y - 0.25`,
+  `int32_t` (full 32 bit scale): `Sine`, `Sine_2` (sine through `0.5*Y^2 + 0.75*Y - 0.25`,
   emulating vacuum-tube second-order distortion), `Triangle`, `Square`. All
-  four are RMS-levelled to the same loudness (~18317) with zero DC offset,
-  so peaks differ per waveform.
+  four are RMS-levelled to the same loudness with zero DC offset, so peaks
+  differ per waveform.
+- Volume: `Volume_Table[256]` is a Q31 gain (0 dB = 2^31 − 1, not 2^31, so
+  the difference of two gains fits an `int32_t`), indexed by
+  `Volume_Distance - Loud_MM`. 100 mm (`Loud_MM`) is 0 dB, each mm is
+  −0.4 dB down to −102.4 dB at 354 mm, and 355 mm (`Mute_MM`) is 0.
+  Out-of-range distances clamp. A 32 bit gain is needed: a 16 bit one can't
+  give distinct 0.4–0.5 dB steps below about −72 dB.
+- Gain ramp (hand-written): the same pattern as the pitch ramp, a linear
+  glide over 2048 samples on each change of volume distance, landing exactly
+  on the target. The gain starts at 0, so power-up is silent.
+- Gain multiply: the Cortex-M0+ has only a 32×32→32 multiply and a 64 bit
+  product would call `__aeabi_lmul` in flash, so `Apply_Gain()` forms
+  Sample × Gain / 2^31 from three 16×16 partial products (3 `muls`,
+  within 3 LSB of exact).
 - The tables are emitted `static const` with `__not_in_flash("dds")` so they
-  live in RAM (section `.time_critical.dds`, ~9.5 KB) and sample generation
+  live in RAM (section `.time_critical.dds`, ~18 KB) and sample generation
   never stalls on an XIP flash cache miss. Consequently `dds_table.h`
   includes `pico.h` and only compiles inside the Pico SDK build.
 - `dds_table.h` is intended to be included only by `dds_generator.c`.
@@ -180,19 +207,13 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   overrun the 50 ms period. The pitch distance goes straight to `I2S_Output_Set_Distance()` (the DDS
   generator clamps and ramps it). Out-of-range or failed pitch measurements
   send `Lowest_Note_MM`. Valid volume readings are first corrected by
-  `correct_volume_range()` (see the calibration notes below), then clamped
-  to 100..307 mm. Out-of-range or failed readings give 307. The PCM5122
-  volume code is `distance − 52`: 100 mm → 48 (0 dB, the gain is capped
-  there to avoid clipping), 306 → 254 (−103 dB), 307 → 255 (mute). There is
-  no distance filter (removed in stage 5), so single-reading spikes and
-  dropouts are not rejected. Instead `struct volume_ramp` moves the DAC to
-  each new code in `VOLUME_STEPS` (25) linear steps, one every
-  `VOLUME_STEP_MS` (2 ms), starting from the code last written.
-  `PCM5122_Set_Volume()` is called only when the code changes. The steps are
-  taken by `volume_ramp_service()` from the main thread — inside
-  `finish_ranging()`'s data-ready polling loop and while waiting for the next
-  poll — not from a timer IRQ, because the PCM5122 shares I2C1 with the
-  volume sensor. It also polls
+  `correct_volume_range()` (see the calibration notes below), then
+  sent with `I2S_Output_Set_Volume()`. Out-of-range or failed readings
+  send `Mute_MM`. The DDS generator clamps the volume distance and ramps
+  the gain. The volume
+  sensor was calibrated only up to 300 mm, so 300–355 mm is extrapolated.
+  There is no distance filter (removed in stage 5), so single-reading
+  spikes and dropouts are not rejected. The loop also polls
   `Waveform_Select_Read()` each loop and prints the waveform on change. Measurement problems are printed only when the status
   changes (`pico_enable_stdio_usb` is on, UART stdio is off).
 - `src/dds_generator.c` — `DDS_Generator()`, see the DDS design above.
@@ -201,15 +222,17 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   Triangle, Square wins; none low → Sine. Debounced: a change needs two
   consecutive identical reads, so `Waveform_Select_Read()` must be called
   ≥20 ms apart (the 50 ms main loop does this).
-- `src/audio_i2s.pio` — 8-instruction I2S transmitter: 16-bit stereo,
-  32 BCK per frame (BCK = 1.4112 MHz), 2 PIO cycles per bit (fractional
-  clock divider from the 125 MHz system clock). Each 32-bit FIFO word is one
-  frame: bits 31..16 right, 15..0 left.
+- `src/audio_i2s.pio` — 8-instruction I2S transmitter: 32-bit stereo,
+  64 BCK per frame (BCK = 2.841 MHz), 2 PIO cycles per bit, integer clock
+  divider `PIO_Clock_Divisor` (22) from the 125 MHz system clock. Each
+  frame is two 32-bit FIFO words, left (LRCK low) then right.
 - `src/i2s_output.c` — PIO0 plus two DMA channels chained ping-pong over two
-  128-frame buffers (~2.9 ms each). The DMA_IRQ_0 handler refills the
-  finished buffer from `DDS_Generator()` and rearms it. The distance and
-  waveform are passed from the main loop through volatiles
-  (`I2S_Output_Set_Distance()` / `I2S_Output_Set_Waveform()`). The handler, the
+  128-frame (256-word) buffers (~2.9 ms each). The DMA_IRQ_0 handler
+  refills the finished buffer from `DDS_Generator()` and rearms it. The
+  pitch distance, volume distance and waveform are passed from the main
+  loop through volatiles (`I2S_Output_Set_Distance()` /
+  `I2S_Output_Set_Volume()` / `I2S_Output_Set_Waveform()`). The volume
+  distance starts at `Mute_MM`. The handler, the
   buffers and the DDS code/tables all live in RAM.
   `I2S_Output_Report_Status()` (printed only when `PCM5122_Init()` fails)
   shows the state machine/DMA state and, for each I2S pin, the transitions
@@ -220,18 +243,22 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   the PCM5122 runs in 3-wire mode with its PLL referenced to BCK (datasheet
   §8.3.6.3); the I2S stream must already be running when `PCM5122_Init()`
   is called. Register sequence (page 0): standby → reset → PLL ref = BCK
-  (0x0D=0x10) → ignore SCK detection/halt (0x25=0x18) → I2S 16-bit
-  (0x28=0x00) → volume −103 dB (0x3D/0x3E=0xFE, until the main loop sets it
-  from the volume sensor; starting at 0xFF, mute, leaves the DAC stuck in
-  power state 4, volume ramp up, and it never reaches Run) → unmute → leave standby, then
-  wait for reg 118 power state 0x5 (Run). If the PLL doesn't lock it prints
-  regs 4, 91, 94, 95 and 118 (PLL lock, detected FS, clock status/errors,
-  power state). If the DAC doesn't acknowledge at all it prints the I2C1
+  (0x0D=0x10) → ignore SCK detection/halt (0x25=0x18) → I2S 32-bit
+  (0x28=0x03) → volume 0 dB (0x3D/0x3E=48, `PCM5122_Volume_0dB`; never
+  written again, the volume is in the DDS, so I2C1 is otherwise used only
+  by the volume sensor. Don't start at 0xFF, mute: it leaves the DAC stuck
+  in power state 4, volume ramp up, and it never reaches Run) → unmute →
+  leave standby, then wait for reg 118 power state 0x5 (Run).
+  `PCM5122_Report_Status()` prints regs 4, 91, 94, 95 and 118 (PLL lock,
+  detected FS, clock status/errors, power state) at every boot and when Run
+  isn't reached. A healthy boot shows `4=0x01 91=0x30 94=0x40 95=0x10
+  118=0x85`: reg 91's low nibble (SCK ratio error), reg 94's SCK missing
+  and reg 95's latched SCK halt are expected with no SCK. If the DAC doesn't acknowledge at all it prints the I2C1
   idle levels and a bus scan with acknowledged/NACK/timeout counts — all
   NACKs means a working bus with nothing answering (in practice: the DAC
   board's power supply was missing).
-  If the PLL won't lock, the next things to try are 64 BCK/frame (32-bit
-  slots) or disabling clock autoset (DCAS) and setting the PLL manually.
+  The PLL locks at 64 BCK/frame. If it ever won't, the next thing to try is
+  disabling clock autoset (DCAS) and setting the PLL manually.
 
 ### Known API gotcha
 

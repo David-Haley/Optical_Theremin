@@ -23,14 +23,19 @@ void I2S_Output_Start (void);
 // by DDS_Generator.
 void I2S_Output_Set_Distance (int Distance);
 
+// Sets the distance in mm that determines the output volume, loudest
+// at Loud_MM and muted at Mute_MM. Values outside that range are
+// clamped by DDS_Generator.
+void I2S_Output_Set_Volume (int Volume_Distance);
+
 // Sets the waveform produced by DDS_Generator. The phase is
 // continuous across a change so switching does not click.
 void I2S_Output_Set_Waveform (Waveforms Waveform);
 
 // Prints the PIO state machine and DMA state and, for each I2S pin,
 // the transitions driven by the PIO against those read back from the
-// pin, for diagnosing a PCM5122 that fails to lock. Expect about 2800
-// (BCK) and 88 (LRCK) transitions in 1 ms; driven transitions with
+// pin, for diagnosing a PCM5122 that fails to lock. Expect about 5700
+// (BCK) and 89 (LRCK) transitions in 1 ms; driven transitions with
 // none read back mean the pin is being held by something external.
 void I2S_Output_Report_Status (void);
 

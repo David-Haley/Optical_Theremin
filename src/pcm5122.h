@@ -15,21 +15,16 @@
 #define PCM5122_Address      0x4D
 #define PCM5122_I2C_Speed_Hz 100000 // shared with the volume VL53L0X
 
-// Digital volume codes (datasheet table 29): 0 is +24 dB, each step
-// is -0.5 dB down to 254 (-103 dB), and 255 mutes.
-#define PCM5122_Volume_Quietest 254
-#define PCM5122_Volume_Mute  255
+// Digital volume code (datasheet table 29): 0 is +24 dB and each step
+// is -0.5 dB, so 48 is 0 dB.
+#define PCM5122_Volume_0dB 48
 
-// Configures the PCM5122 for 16 bit I2S, clocked by its PLL from
-// BCK (no SCK), with the digital volume at its quietest (-103 dB),
-// and waits for it to reach the Run state. The volume must not be
-// muted here, or the PCM5122 stays in its volume ramp up state. The I2S stream must already be running. Returns
-// false, after printing diagnostics, if configuration fails.
+// Configures the PCM5122 for 32 bit I2S, clocked by its PLL from
+// BCK (no SCK), with the digital volume fixed at 0 dB (the volume is
+// set by DDS_Generator), and waits for it to reach the Run state. The
+// I2S stream must already be running. Returns false, after printing
+// diagnostics, if configuration fails.
 bool PCM5122_Init (void);
-
-// Sets the digital volume of both channels (see PCM5122_Volume_Mute
-// above). Returns false if the I2C write fails.
-bool PCM5122_Set_Volume (uint8_t Volume);
 
 // Prints the I2C1 idle levels and the addresses that acknowledge a
 // read (the PCM5122 at 0x4D and the volume VL53L0X at 0x29).

@@ -44,9 +44,9 @@ static const Register_Setting Init_Sequence [] = {
   {Reset,         0x11}, // RSTM and RSTR, reset modules and registers
   {PLL_Reference, 0x10}, // SREF = 001, PLL reference is BCK
   {Error_Detect,  0x18}, // IDSK and IDCH, no SCK is supplied
-  {I2S_Format,    0x00}, // I2S, 16 bits
-  {Left_Volume,   PCM5122_Volume_Quietest}, // near silent until the
-  {Right_Volume,  PCM5122_Volume_Quietest}, // first volume reading
+  {I2S_Format,    0x03}, // I2S, 32 bits
+  {Left_Volume,   PCM5122_Volume_0dB}, // fixed, the volume is set
+  {Right_Volume,  PCM5122_Volume_0dB}, // by DDS_Generator
   {Mute,          0x00}, // unmute both channels
   {Standby,       0x00}  // normal operation
 };
@@ -99,11 +99,6 @@ void PCM5122_Scan_Bus (void) {
           "%d other\n", Found, NACKs, Timeouts, Others);
 } // Scan_Bus
 
-bool PCM5122_Set_Volume (uint8_t Volume) {
-  return Write_Register (Left_Volume, Volume) &&
-         Write_Register (Right_Volume, Volume);
-} // PCM5122_Set_Volume
-
 void PCM5122_Report_Status (void) {
   static const uint8_t Registers [] =
     {PLL, Detected_FS, Clock_Status, Clock_Errors, Power_State};
@@ -147,6 +142,7 @@ bool PCM5122_Init (void) {
     sleep_ms (10);
     if (Read_Register (Power_State, &State) &&
         (State & Power_State_Mask) == Power_State_Run) {
+      PCM5122_Report_Status ();
       return true;
     } // Power state is Run
   } while (!time_reached (Timeout));
