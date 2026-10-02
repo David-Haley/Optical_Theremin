@@ -6,6 +6,11 @@
 --  Created   : 18/09/2026
 --  Last Edit : 02/10/2026
 
+--  20261002 : Octave range selection. The DDS generator shifts the phase step
+--  by Octave_Shift, Lowest_Octave_Shift .. Highest_Octave_Shift, so the five
+--  octave span can start from A0, A1 or A2. The limits and the octave number
+--  of the lowest note are written to the dds generator header, and the
+--  largest shifted phase step is checked to be less than 2 ** 31.
 --  20261002 : Use an integer divisor for the PIO clock giving a jitter free
 --  but nonstandard sample frequency sample_Frequency a define in the dds
 --  generator header. The dds is now going to implement volume control so a
@@ -25,6 +30,8 @@ with Ada.Calendar; use Ada.Calendar;
 with Ada.Calendar.Formatting; use Ada.Calendar.Formatting;
 with Ada.Numerics; use Ada.Numerics;
 with Ada.Numerics.Generic_Elementary_Functions;
+with Ada.Strings; use Ada.Strings;
+with Ada.Strings.Fixed; use Ada.Strings.Fixed;
 with Interfaces; use Interfaces;
 
 procedure Optical_Theremin is
@@ -62,6 +69,10 @@ procedure Optical_Theremin is
    Highest_Note_MM : constant Positive := 60; -- distance for highest note in mm
    Lowest_Note_MM : constant Positive :=
      Highest_Note_MM + MM_per_Octave * Octaves;
+   --  The range can be moved by whole octaves, shifting the phase step.
+   Lowest_Octave_Shift : constant Integer := -1; -- A0 to A5
+   Highest_Octave_Shift : constant Natural := 1; -- A2 to A7
+   Lowest_Note_Octave : constant Positive := 1; -- A1 at Octave_Shift 0
 
    subtype Frequency_Indices is Positive range Highest_Note_MM .. Lowest_Note_MM;
    type Frequency_Element is record
@@ -405,6 +416,19 @@ procedure Optical_Theremin is
       Put (Output_File, "#define Lowest_Note_MM" & Lowest_Note_MM'Img);
       Comment ("Distance for lowest frequency");
       New_Line (Output_File);
+      --  Negative, so 'Img has no leading space; bracketed as a C macro.
+      Put (Output_File, "#define Lowest_Octave_Shift (" &
+             Trim (Lowest_Octave_Shift'Img, Both) & ")");
+      Comment ("Lowest range, A0 to A5");
+      Put (Output_File, "#define Highest_Octave_Shift" &
+             Highest_Octave_Shift'Img);
+      Comment ("Highest range, A2 to A7");
+      Put (Output_File, "#define Lowest_Note_Octave" &
+             Lowest_Note_Octave'Img);
+      Comment ("Octave of the lowest note at Octave_Shift 0");
+      Put (Output_File, "#define Octave_Count" & Octaves'Img);
+      Comment ("Octaves from Lowest_Note_MM to Highest_Note_MM");
+      New_Line (Output_File);
       Put (Output_File, "#define Loud_MM" & Loud_MM'Img);
       Comment ("Distance for maximum voume");
       Put (Output_File, "#define Mute_MM" & Muted_MM'Img);
@@ -441,13 +465,18 @@ procedure Optical_Theremin is
       Comment ("Volume_Distance defines the output volume, for Loud_MM the");
       Comment ("the maximum output level is produced and for Muted_MM, no");
       Comment ("output is produced.");
+      Comment ("Octave_Shift moves the whole range by whole octaves,");
+      Comment ("Lowest_Octave_Shift .. Highest_Octave_Shift, out of range");
+      Comment ("values are clamped.");
       Put_Line (Output_File, "Audio_Sample DDS_Generator (");
       Indent;
       Put_Line (Output_File, "const Waveforms Waveform,");
       Indent;
       Put_Line (Output_File, "const int Tone_Distance,");
       Indent;
-      Put_Line (Output_File, "const int Volume_Distance");
+      Put_Line (Output_File, "const int Volume_Distance,");
+      Indent;
+      Put_Line (Output_File, "const int Octave_Shift");
       Put_Line (Output_File, ");");
       New_Line (Output_File);
       Put_Line (Output_File, "#endif // DDS_GENERATOR_H");
@@ -582,6 +611,15 @@ begin -- Optical_Theremin
    Put_Line (Name_and_Version);
    Build (Frequency_Table);
    Put (Frequency_Table);
+   --  The pitch ramp in the DDS generator takes the difference of two phase
+   --  steps as an int32_t, so the largest shifted step must be less than
+   --  2 ** 31.
+   if Unsigned_64 (Frequency_Table (Highest_Note_MM).Step) *
+     2 ** Highest_Octave_Shift >= 2 ** 31
+   then
+      raise Program_Error with
+        "Phase_Step shifted by Highest_Octave_Shift is not less than 2 ** 31";
+   end if; -- Unsigned_64 (Frequency_Table (Highest_Note_MM).Step) * ...
    Build (Wave_Table);
    Put (Wave_Table);
    Wave_Properties (Wave_Table, Property_Table);

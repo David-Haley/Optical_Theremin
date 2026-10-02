@@ -1,8 +1,8 @@
 // This file implements the menu. Turning the encoder moves between
 // items; pushing selects one. Pushing Play leaves the menu. Pushing
 // any other item edits it: turning changes its value and pushing
-// again confirms. To add an item (for example Range), add a value
-// to struct settings and an entry to Items.
+// again confirms. To add an item, add a value to struct settings and
+// an entry to Items.
 // Author : David Haley
 
 #include <stdio.h>
@@ -73,6 +73,28 @@ static void Edit_Waveform (struct settings *S, int Detents) {
   S->waveform = (Waveforms) Wrap (S->waveform, Detents, Square + 1);
 } // Edit_Waveform
 
+void Range_Name (int Octave_Shift, char *Text, int Size) {
+  const int Lowest = Lowest_Note_Octave + Octave_Shift;
+
+  snprintf (Text, Size, "A%d to A%d", Lowest, Lowest + Octave_Count);
+} // Range_Name
+
+static void Format_Range (const struct settings *S, char *Text) {
+  Range_Name (S->octave_shift, Text, DFR0555_Columns);
+} // Format_Range
+
+// The ranges are ordered, so like Brightness they stop at the ends.
+static void Edit_Range (struct settings *S, int Detents) {
+  int Shift = S->octave_shift + Detents;
+
+  if (Shift < Lowest_Octave_Shift) {
+    Shift = Lowest_Octave_Shift;
+  } else if (Shift > Highest_Octave_Shift) {
+    Shift = Highest_Octave_Shift;
+  } // Shift < Lowest_Octave_Shift
+  S->octave_shift = Shift;
+} // Edit_Range
+
 struct menu_item {
   const char *Name;
   // Writes the value shown on line 2, NULL for no value.
@@ -85,6 +107,7 @@ static const struct menu_item Items [] = {
   {"Play",       NULL,              NULL},
   {"Brightness", Format_Brightness, Edit_Brightness},
   {"Waveform",   Format_Waveform,   Edit_Waveform},
+  {"Range",      Format_Range,      Edit_Range},
 };
 
 #define Item_Count ((int) (sizeof (Items) / sizeof (Items [0])))
