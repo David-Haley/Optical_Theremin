@@ -3,8 +3,8 @@
  * The pitch sensor (I2C0, GPIO0/GPIO1, header pins 1 and 2) sets the
  * frequency of the DDS tone generator, whose samples are streamed over I2S
  * to a PCM5122 DAC. The volume sensor shares I2C1 (GPIO2/GPIO3, header pins
- * 4 and 5) with the PCM5122 and sets its digital volume. Readings are not
- * filtered: the DDS generator ramps the pitch and the main loop ramps the
+ * 4 and 5) with the PCM5122 and sets the volume of the DDS tone generator.
+ * Readings are not filtered: the DDS generator ramps both the pitch and the
  * volume between readings. The waveform is
  * selected by grounding one of header pins 14 to 17 (see waveform_select.h).
  * USB serial carries diagnostic and error messages only.
@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "hardware/clocks.h"
 
 #include "vl53l0x_api.h"
 #include "vl53l0x_i2c_platform.h"
@@ -28,6 +29,8 @@
 #define PITCH_I2C_SPEED_KHZ   400
 #define VOLUME_I2C_BUS        1 /* shared with the PCM5122, so its speed */
 #define POLL_PERIOD_MS        50 /* 20 Hz */
+/* PIO_Clock_Divisor and the Phase_Step table assume this system clock. */
+#define SYSTEM_CLOCK_HZ       125000000
 
 /*
  * Longest wait for a measurement, about twice the default 33 ms timing
@@ -60,37 +63,6 @@
 #define VOLUME_CAL_FAR_MM    300
 #define VOLUME_CAL_FAR_READ  3128
 
-/*
- * Volume: the PCM5122 volume code rises one step (-0.5 dB) per mm from
- * VOLUME_LOUDEST_CODE at VOLUME_LOUDEST_MM, so 100 mm or nearer is 48
- * (0 dB, the highest gain allowed), 306 mm is 254 (-103 dB) and
- * VOLUME_MUTE_MM (307 mm) or further, or out of range, is 255 (muted).
- */
-#define VOLUME_LOUDEST_MM   100
-#define VOLUME_LOUDEST_CODE 48 /* 0 dB */
-#define VOLUME_MUTE_MM      (VOLUME_LOUDEST_MM + PCM5122_Volume_Mute - VOLUME_LOUDEST_CODE)
-
-/*
- * Rather than jumping to each new volume, the PCM5122 is moved there in
- * VOLUME_STEPS equal steps, one every VOLUME_STEP_MS, spreading the change
- * over one poll period. The steps are written from the main loop, while it
- * waits for a measurement or for the next poll, not from a timer interrupt:
- * the PCM5122 shares I2C1 with the volume sensor, which may be mid-transfer.
- */
-#define VOLUME_STEP_MS 2
-#define VOLUME_STEPS   (POLL_PERIOD_MS / VOLUME_STEP_MS)
-
-_Static_assert(POLL_PERIOD_MS % VOLUME_STEP_MS == 0, "POLL_PERIOD_MS must be a multiple of VOLUME_STEP_MS");
-
-struct volume_ramp {
-	int start;   /* volume code at the start of the ramp */
-	int target;  /* volume code from the latest measurement */
-	int current; /* volume code last written to the PCM5122 */
-	int step;    /* steps taken so far, 0..VOLUME_STEPS */
-	absolute_time_t next_step;
-	bool write_ok;
-};
-
 /* A sensor and what was last reported about it. */
 struct sensor {
 	const char *name;
@@ -109,38 +81,6 @@ static void die_on_error(const char *name, const char *step, VL53L0X_Error statu
 			PCM5122_Scan_Bus();
 		while (true)
 			tight_loop_contents();
-	}
-}
-
-/* Starts a new ramp from the current volume to target. */
-static void volume_ramp_set(struct volume_ramp *r, int target)
-{
-	r->start = r->current;
-	r->target = target;
-	r->step = 0;
-	r->next_step = make_timeout_time_ms(VOLUME_STEP_MS);
-}
-
-/*
- * Takes the next ramp step if it is due. Writes to the PCM5122 only when the
- * volume code changes, and reports write failures only when they change.
- */
-static void volume_ramp_service(struct volume_ramp *r)
-{
-	if (r->step >= VOLUME_STEPS || !time_reached(r->next_step))
-		return;
-	r->step++;
-	r->next_step = delayed_by_ms(r->next_step, VOLUME_STEP_MS);
-
-	int code = r->start + (r->target - r->start) * r->step / VOLUME_STEPS;
-	if (code == r->current)
-		return;
-	bool ok = PCM5122_Set_Volume((uint8_t)code);
-	if (ok)
-		r->current = code;
-	if (ok != r->write_ok) {
-		printf(ok ? "PCM5122 volume write recovered\n" : "PCM5122 volume write failed\n");
-		r->write_ok = ok;
 	}
 }
 
@@ -197,9 +137,7 @@ static VL53L0X_Error start_ranging(struct sensor *s)
 	return VL53L0X_StartMeasurement(&s->device);
 }
 
-/* Keeps the volume ramp stepping while it waits. */
-static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurementData_t *measurement,
-				    struct volume_ramp *ramp)
+static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurementData_t *measurement)
 {
 	VL53L0X_DEV Dev = &s->device;
 	absolute_time_t timeout = make_timeout_time_ms(RANGING_TIMEOUT_MS);
@@ -209,7 +147,6 @@ static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurement
 	while ((status = VL53L0X_GetMeasurementDataReady(Dev, &ready)) == VL53L0X_ERROR_NONE && !ready) {
 		if (time_reached(timeout))
 			return VL53L0X_ERROR_TIME_OUT;
-		volume_ramp_service(ramp);
 		VL53L0X_PollingDelay(Dev);
 	}
 	PALDevDataSet(Dev, PalState, VL53L0X_STATE_IDLE);
@@ -226,14 +163,13 @@ static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurement
  * found nothing in range. Only reports a problem when it changes, so an
  * empty field of view doesn't print a line on every poll.
  */
-static bool read_range(struct sensor *s, VL53L0X_Error start_status, int *range_mm,
-		       struct volume_ramp *ramp)
+static bool read_range(struct sensor *s, VL53L0X_Error start_status, int *range_mm)
 {
 	VL53L0X_RangingMeasurementData_t measurement;
 	VL53L0X_Error status = start_status;
 
 	if (status == VL53L0X_ERROR_NONE)
-		status = finish_ranging(s, &measurement, ramp);
+		status = finish_ranging(s, &measurement);
 	uint8_t range_status = status == VL53L0X_ERROR_NONE ? measurement.RangeStatus : 0;
 
 	if (status != s->last_status || range_status != s->last_range_status) {
@@ -265,6 +201,14 @@ int main(void)
 	stdio_init_all();
 	sleep_ms(2000); /* let USB CDC enumerate and the sensors finish booting */
 
+	uint32_t clk_sys_hz = clock_get_hz(clk_sys);
+	if (clk_sys_hz != SYSTEM_CLOCK_HZ) {
+		printf("System clock is %lu Hz, not %lu Hz: every note would be out of tune\n",
+		       (unsigned long)clk_sys_hz, (unsigned long)SYSTEM_CLOCK_HZ);
+		while (true)
+			tight_loop_contents();
+	}
+
 	static struct sensor pitch = { .name = "Pitch" };
 	static struct sensor volume = { .name = "Volume" };
 
@@ -288,35 +232,22 @@ int main(void)
 	}
 	printf("PCM5122 running\n");
 
-	/* PCM5122_Init() leaves the volume at PCM5122_Volume_Quietest. */
-	struct volume_ramp volume_ramp = {
-		.start = PCM5122_Volume_Quietest,
-		.target = PCM5122_Volume_Quietest,
-		.current = PCM5122_Volume_Quietest,
-		.step = VOLUME_STEPS,
-		.write_ok = true,
-	};
-
 	while (true) {
 		absolute_time_t next_poll = make_timeout_time_ms(POLL_PERIOD_MS);
 		VL53L0X_Error pitch_start = start_ranging(&pitch);
 		VL53L0X_Error volume_start = start_ranging(&volume);
 
 		int pitch_mm;
-		if (!read_range(&pitch, pitch_start, &pitch_mm, &volume_ramp))
+		if (!read_range(&pitch, pitch_start, &pitch_mm))
 			pitch_mm = Lowest_Note_MM;
 		I2S_Output_Set_Distance(pitch_mm); /* DDS_Generator() clamps it */
 
 		int volume_mm;
-		if (read_range(&volume, volume_start, &volume_mm, &volume_ramp))
+		if (read_range(&volume, volume_start, &volume_mm))
 			volume_mm = correct_volume_range(volume_mm);
 		else
-			volume_mm = VOLUME_MUTE_MM;
-		if (volume_mm < VOLUME_LOUDEST_MM)
-			volume_mm = VOLUME_LOUDEST_MM;
-		else if (volume_mm > VOLUME_MUTE_MM)
-			volume_mm = VOLUME_MUTE_MM;
-		volume_ramp_set(&volume_ramp, volume_mm - VOLUME_LOUDEST_MM + VOLUME_LOUDEST_CODE);
+			volume_mm = Mute_MM;
+		I2S_Output_Set_Volume(volume_mm); /* DDS_Generator() clamps it */
 
 		Waveforms selected = Waveform_Select_Read();
 		if (selected != waveform) {
@@ -325,13 +256,6 @@ int main(void)
 			printf("Waveform %s\n", waveform_names[waveform]);
 		}
 
-		while (!time_reached(next_poll)) {
-			volume_ramp_service(&volume_ramp);
-			absolute_time_t wake = next_poll;
-			if (volume_ramp.step < VOLUME_STEPS &&
-			    absolute_time_diff_us(volume_ramp.next_step, wake) > 0)
-				wake = volume_ramp.next_step;
-			sleep_until(wake);
-		}
+		sleep_until(next_poll);
 	}
 }

@@ -20,31 +20,35 @@
 _Static_assert (I2S_LRCK_Pin == I2S_BCK_Pin + 1,
                 "The PIO program requires LRCK to be BCK + 1");
 
-// Frames per buffer, 128 frames is approximately 2.9 ms.
+// Frames per buffer, 128 frames is approximately 2.9 ms. Each frame is
+// two 32 bit words, left then right.
 #define Buffer_Frames 128
+#define Buffer_Words (Buffer_Frames * 2)
 
 static PIO const Audio_Pio = pio0;
 static uint State_Machine;
 static int DMA_Channel [2];
-static uint32_t Buffer [2] [Buffer_Frames];
+static uint32_t Buffer [2] [Buffer_Words];
 
 // Written by the main loop, read by the DMA interrupt. A 32 bit
 // store is atomic so no further protection is required.
 static volatile int Distance = Lowest_Note_MM;
 static volatile Waveforms Waveform = Sine;
+static volatile int Volume_Distance = Mute_MM;
 
-// Fills a buffer with frames. Each frame holds the right sample in
-// bits 31 .. 16 and the left sample in bits 15 .. 0, see
-// audio_i2s.pio.
-static void __time_critical_func (Fill_Buffer) (uint32_t *Frames) {
+// Fills a buffer with frames. Each frame is the left sample followed
+// by the right sample, see audio_i2s.pio.
+static void __time_critical_func (Fill_Buffer) (uint32_t *Words) {
   const int Current_Distance = Distance;
   const Waveforms Current_Waveform = Waveform;
+  const int Current_Volume_Distance = Volume_Distance;
   Audio_Sample Sample;
 
   for (int F = 0; F < Buffer_Frames; F++) {
-    Sample = DDS_Generator (Current_Waveform, Current_Distance);
-    Frames [F] = ((uint32_t) (uint16_t) Sample.Right << 16) |
-                 (uint32_t) (uint16_t) Sample.Left;
+    Sample = DDS_Generator (Current_Waveform, Current_Distance,
+                            Current_Volume_Distance);
+    Words [2 * F] = (uint32_t) Sample.Left;
+    Words [2 * F + 1] = (uint32_t) Sample.Right;
   } // F < Buffer_Frames
 } // Fill_Buffer
 
@@ -66,7 +70,7 @@ void I2S_Output_Start (void) {
 
   State_Machine = pio_claim_unused_sm (Audio_Pio, true);
   audio_i2s_program_init (Audio_Pio, State_Machine, Offset, I2S_DIN_Pin,
-                          I2S_BCK_Pin, Sample_Rate);
+                          I2S_BCK_Pin, PIO_Clock_Divisor);
   for (int B = 0; B < 2; B++) {
     DMA_Channel [B] = dma_claim_unused_channel (true);
   } // B < 2
@@ -81,7 +85,7 @@ void I2S_Output_Start (void) {
     channel_config_set_chain_to (&Config, DMA_Channel [1 - B]);
     dma_channel_configure (DMA_Channel [B], &Config,
                            &Audio_Pio->txf [State_Machine], Buffer [B],
-                           Buffer_Frames, false);
+                           Buffer_Words, false);
     dma_channel_set_irq0_enabled (DMA_Channel [B], true);
   } // B < 2
   irq_set_exclusive_handler (DMA_IRQ_0, DMA_Handler);
@@ -145,3 +149,7 @@ void I2S_Output_Set_Distance (int New_Distance) {
 void I2S_Output_Set_Waveform (Waveforms New_Waveform) {
   Waveform = New_Waveform;
 } // I2S_Output_Set_Waveform
+
+void I2S_Output_Set_Volume (int New_Volume_Distance) {
+  Volume_Distance = New_Volume_Distance;
+} // I2S_Output_Set_Volume

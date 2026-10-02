@@ -1,13 +1,13 @@
-; This PIO program transmits a 16 bit stereo I2S stream, 32 BCK
+; This PIO program transmits a 32 bit stereo I2S stream, 64 BCK
 ; periods per frame. Each instruction is half a BCK period, so
-; the state machine clock must be 64 times the sample rate.
+; the state machine clock must be 128 times the sample rate.
 ; Side-set bit 0 drives BCK and bit 1 drives LRCK, so the LRCK
 ; pin must be the BCK pin + 1. Data changes while BCK is low and
 ; is stable on the BCK rising edge. The last bit of each word is
 ; sent after LRCK changes, giving the one bit I2S data delay.
-; Each 32 bit word pulled from the TX FIFO is one frame, shifted
-; out MSB first: bits 31 .. 16 are the right sample (LRCK high)
-; and bits 15 .. 0 are the left sample (LRCK low).
+; Each frame is two 32 bit words pulled from the TX FIFO, shifted
+; out MSB first: first the left sample (LRCK low) then the right
+; sample (LRCK high).
 ; Author : David Haley
 
 .program audio_i2s
@@ -15,17 +15,17 @@
 
                       ;        /--- LRCK
                       ;        |/-- BCK
-Right_Loop:           ;        ||
-    out pins, 1         side 0b10
-    jmp x-- Right_Loop  side 0b11
-    out pins, 1         side 0b00 ; right LSB, LRCK now low
-    set x, 14           side 0b01
-Left_Loop:
+Left_Loop:            ;        ||
     out pins, 1         side 0b00
     jmp x-- Left_Loop   side 0b01
     out pins, 1         side 0b10 ; left LSB, LRCK now high
+    set x, 30           side 0b11
+Right_Loop:
+    out pins, 1         side 0b10
+    jmp x-- Right_Loop  side 0b11
+    out pins, 1         side 0b00 ; right LSB, LRCK now low
 public Entry_Point:
-    set x, 14           side 0b11
+    set x, 30           side 0b01
 
 % c-sdk {
 
@@ -33,25 +33,26 @@ public Entry_Point:
 
 // Configures the state machine and its pins but does not enable
 // it. The state machine is left ready to start at Entry_Point.
+// Clock_Divisor is an integer divider from the system clock, so
+// that the bit clock has no fractional divider jitter; the sample
+// rate is clk_sys / (Clock_Divisor * 128).
 static inline void audio_i2s_program_init (
   PIO Pio,
   uint State_Machine,
   uint Offset,
   uint Data_Pin,
   uint Clock_Pin_Base,
-  uint Sample_Rate_Hz
+  uint Clock_Divisor
 ) {
   pio_sm_config Config = audio_i2s_program_get_default_config (Offset);
   uint Pin_Mask = (1u << Data_Pin) | (3u << Clock_Pin_Base);
 
   sm_config_set_out_pins (&Config, Data_Pin, 1);
   sm_config_set_sideset_pins (&Config, Clock_Pin_Base);
-  // Shift left (MSB first), autopull a full 32 bit frame.
+  // Shift left (MSB first), autopull one full 32 bit sample.
   sm_config_set_out_shift (&Config, false, true, 32);
   sm_config_set_fifo_join (&Config, PIO_FIFO_JOIN_TX);
-  sm_config_set_clkdiv (&Config,
-                        (float) clock_get_hz (clk_sys) /
-                          (float) (Sample_Rate_Hz * 64u));
+  sm_config_set_clkdiv_int_frac8 (&Config, Clock_Divisor, 0);
   pio_sm_init (Pio, State_Machine, Offset, &Config);
   pio_sm_set_pins_with_mask (Pio, State_Machine, 0, Pin_Mask);
   pio_sm_set_pindirs_with_mask (Pio, State_Machine, Pin_Mask, Pin_Mask);
