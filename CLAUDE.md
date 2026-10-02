@@ -9,8 +9,13 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 6, spec in `Documents/Stage_6.md`; earlier stages in
-`Stage_2.md`–`stage_5.md`): two VL53L0X sensors are polled at 20 Hz. The
+Current state (stage 7, spec in `Documents/Stage_7.md`; earlier stages in
+`Stage_2.md`–`Stage_6.md`): at boot a DFR0555 2×16 display shows the
+program name and build date, then a menu driven by a rotary encoder with a
+push switch sets the backlight brightness and waveform. Selecting Play
+starts the theremin and a push returns to the menu (silent). Settings are
+not saved. A Range (octave) menu item is planned. In play, two VL53L0X
+sensors are polled at 20 Hz. The
 pitch sensor's distance sets the pitch and the volume sensor's distance sets
 a gain applied inside the DDS generator; the PCM5122 volume is fixed at
 0 dB. Readings are not filtered; instead the DDS generator ramps both the
@@ -18,9 +23,8 @@ pitch and the gain between readings, sample by sample. Stage 5 stepped the
 PCM5122 volume over I2C instead, which crackled on fast hand movements.
 What was built differs from `Stage_6.md` in places: the gain table is
 indexed by distance (100–355 mm, 0.4 dB per mm), not by PCM5122 volume
-code, and the wave table is 32 bit.
-The waveform is selected by grounding one of four GPIO inputs. USB
-serial carries diagnostic and error messages only — no distance readings.
+code, and the wave table is 32 bit (stage 6).
+USB serial carries diagnostic and error messages only — no distance readings.
 The CMake target is `optical_theremin` (it was `distance_measurement`, from
 the distance-measurement app the project grew from).
 
@@ -28,14 +32,19 @@ the distance-measurement app the project grew from).
 
 | Signal | Pin | GPIO | Peripheral |
 |---|---|---|---|
-| Pitch VL53L0X SDA / SCL | 1 / 2 | GP0 / GP1 | I2C0, addr 0x29, 400 kHz |
+| Pitch VL53L0X SDA / SCL | 1 / 2 | GP0 / GP1 | I2C0, addr 0x29, 100 kHz |
+| DFR0555 display SDA / SCL | 1 / 2 | GP0 / GP1 | I2C0 (shared), LCD 0x3E, SN3193 backlight 0x6B |
 | PCM5122 SDA / SCL | 4 / 5 | GP2 / GP3 | I2C1, addr 0x4D, 100 kHz |
 | Volume VL53L0X SDA / SCL | 4 / 5 | GP2 / GP3 | I2C1 (shared), addr 0x29 |
 | I2S DIN | 31 | GP26 | PIO0 |
 | I2S BCK | 26 | GP20 | PIO0 side-set |
 | I2S LRCK | 27 | GP21 | PIO0 side-set (must be BCK + 1) |
-| Select Sine / Sine_2 | 14 / 15 | GP10 / GP11 | input, pull-up, active low |
-| Select Triangle / Square | 16 / 17 | GP12 / GP13 | input, pull-up, active low |
+| Encoder A / B | 14 / 15 | GP10 / GP11 | input, pull-up, active low |
+| Encoder push | 16 | GP12 | input, pull-up, active low |
+
+I2C0 was 400 kHz until stage 7. The display's AiP31068 LCD controller drops
+characters at 400 kHz (a line showed only `>Pa`), so I2C0 runs at 100 kHz.
+The display is on I2C0 rather than I2C1 because that is easier to wire.
 
 `Documents/Stage_2.md` lists the PCM5122 SDA as "pin 3"; that is the Pi
 40-pin header numbering. On the Pico it is pin 4 (GP2). It also lists BCK and
@@ -70,6 +79,11 @@ configure from scratch: CMake caches absolute paths, and a stale cache will
 silently compile against include paths from the old location.
 
 Output: `build/optical_theremin.uf2` and `.elf`.
+
+The custom target `build_date` runs `build_date.cmake` on every build to
+write `build/generated/build_date/build_date.h` (`Build_Date`, ISO date,
+shown on the start-up screen). `file(CONFIGURE)` only rewrites it when the
+date changes, so `main.c` recompiles at most once a day.
 
 ## Flash and monitor
 
@@ -197,10 +211,17 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   - `src/vl53l0x_i2c_win_serial_comms.c` and `src/vl53l0x_platform_log.c` are
     the original Windows-only files, kept for reference but **not** listed in
     `CMakeLists.txt`'s sources — don't add them to the build.
-- `src/main.c` — application entry point: runs the VL53L0X init sequence
+- `src/main.c` — application entry point. After the 2 s USB delay it
+  initialises I2C0 (`VL53L0X_comms_initialise`, which also clears a stuck
+  bus) and the display, and shows the start-up screen for at least 2 s
+  while it checks the 125 MHz clock, runs the VL53L0X init sequence
   (`init_sensor()`) for the pitch sensor and then the volume sensor, starts
-  the I2S output, initialises the PCM5122, then runs a loop every 50 ms
-  (20 Hz). Each loop starts a single ranging measurement on
+  the I2S output, initialises the PCM5122 and starts the encoder. Fatal
+  errors are printed on USB serial and shown on display line 2 (`fatal()`).
+  It then alternates `Menu_Run()` and `play()`. `play()` sets the
+  waveform, shows its name on line 1 (line 2 is reserved for Range) and
+  runs a loop every 50 ms
+  (20 Hz) until the encoder is pushed, then mutes. Each loop starts a single ranging measurement on
   both sensors and then collects both (`start_ranging()`/`finish_ranging()`,
   the two halves of `VL53L0X_PerformSingleRangingMeasurement`). The sensors
   range at the same time because two back-to-back ~33 ms measurements would
@@ -213,15 +234,37 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   the gain. The volume
   sensor was calibrated only up to 300 mm, so 300–355 mm is extrapolated.
   There is no distance filter (removed in stage 5), so single-reading
-  spikes and dropouts are not rejected. The loop also polls
-  `Waveform_Select_Read()` each loop and prints the waveform on change. Measurement problems are printed only when the status
+  spikes and dropouts are not rejected. There is no display traffic while
+  playing. Measurement problems are printed only when the status
   changes (`pico_enable_stdio_usb` is on, UART stdio is off).
 - `src/dds_generator.c` — `DDS_Generator()`, see the DDS design above.
-- `src/waveform_select.c` — waveform select inputs GP10–GP13 (pins 14–17),
-  pull-ups, active low. The first low pin in the order Sine, Sine_2,
-  Triangle, Square wins; none low → Sine. Debounced: a change needs two
-  consecutive identical reads, so `Waveform_Select_Read()` must be called
-  ≥20 ms apart (the 50 ms main loop does this).
+- `src/encoder.c` — SR1230 rotary encoder (30 detents) on GP10/GP11 and
+  its push switch on GP12, sampled every 1 ms from a repeating timer (not
+  the main loop, so turns aren't missed during ~2 ms display writes). A
+  Gray-code transition table ignores invalid (bounce) transitions. The
+  SR1230 goes through a full quadrature cycle per detent and rests at
+  A = B = 1. A detent is counted on reaching that rest state if at least
+  half a cycle was seen, so a missed transition can't put the count out of
+  step. `Encoder_Direction` is −1 so that clockwise counts up. The push
+  switch needs 20 ms stable to press, and 20 ms stable to release before
+  the next press. `Encoder_Take_Detents()`, `Encoder_Take_Press()` and
+  `Encoder_Flush()` read and clear the counts with interrupts disabled.
+- `src/dfr0555_display.c` — C port of the Ada `DFR0555_Display`
+  (`/home/david/Ada/Pi_Common/src/`), version 1.1 module only: AiP31068 LCD
+  at 0x3E (display on, cursor off, whole 16-character lines, no Clear) and
+  SN3193 backlight at 0x6B (OUT1 only, PWM register 0x04). The SN3193
+  current is 10 mA (`Documents/SN3193.pdf` table 6). At the Ada's
+  17.5 mA the LCD washed out above about half PWM. Failures are printed on
+  USB serial only when the state changes and never stop the theremin.
+- `src/menu.c` — `Menu_Run()` mutes the audio, then polls the encoder every
+  10 ms. Items Play, Brightness and Waveform are rows in the `Items` table
+  (name, value formatter, edit handler); adding Range means one row and one
+  field in `struct settings`. Turning moves between items (wrapping), a
+  push on Play returns, and a push on any other item edits it. While
+  editing, turning changes the value and a push confirms. `>` marks what
+  turning changes. Brightness has 16 half-stop levels (PWM 1…255, default
+  8), applied live and stopping at the ends. The display is rewritten only
+  when a line changes.
 - `src/audio_i2s.pio` — 8-instruction I2S transmitter: 32-bit stereo,
   64 BCK per frame (BCK = 2.841 MHz), 2 PIO cycles per bit, integer clock
   divider `PIO_Clock_Divisor` (22) from the 125 MHz system clock. Each

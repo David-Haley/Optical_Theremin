@@ -15,7 +15,9 @@ add_executable(optical_theremin
     src/dds_generator.c
     src/i2s_output.c
     src/pcm5122.c
-    src/waveform_select.c
+    src/encoder.c
+    src/dfr0555_display.c
+    src/menu.c
     Api/core/src/vl53l0x_api.c
     Api/core/src/vl53l0x_api_core.c
     Api/core/src/vl53l0x_api_calibration.c
@@ -29,9 +31,20 @@ pico_generate_pio_header(optical_theremin
     ${CMAKE_CURRENT_LIST_DIR}/src/audio_i2s.pio
 )
 
+# build_date.h is regenerated on every build, see build_date.cmake.
+set(BUILD_DATE_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/build_date)
+add_custom_target(build_date ALL
+    COMMAND ${CMAKE_COMMAND} -DOUTPUT=${BUILD_DATE_DIR}/build_date.h
+            -P ${CMAKE_CURRENT_LIST_DIR}/build_date.cmake
+    BYPRODUCTS ${BUILD_DATE_DIR}/build_date.h
+    COMMENT "Updating build date"
+)
+add_dependencies(optical_theremin build_date)
+
 target_include_directories(optical_theremin PRIVATE
     Api/core/inc
     Api/platform/inc
+    ${BUILD_DATE_DIR}
 )
 
 target_link_libraries(optical_theremin

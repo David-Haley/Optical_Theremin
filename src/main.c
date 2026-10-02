@@ -5,9 +5,13 @@
  * to a PCM5122 DAC. The volume sensor shares I2C1 (GPIO2/GPIO3, header pins
  * 4 and 5) with the PCM5122 and sets the volume of the DDS tone generator.
  * Readings are not filtered: the DDS generator ramps both the pitch and the
- * volume between readings. The waveform is
- * selected by grounding one of header pins 14 to 17 (see waveform_select.h).
- * USB serial carries diagnostic and error messages only.
+ * volume between readings.
+ *
+ * At start up the DFR0555 display (on I2C0 with the pitch sensor) shows the program name and
+ * build date, then the menu (menu.h), where the rotary encoder (encoder.h)
+ * sets the backlight brightness and waveform. Selecting Play starts the
+ * theremin, and pushing the encoder returns to the menu. USB serial carries
+ * diagnostic and error messages only.
  */
 
 #include <stdio.h>
@@ -19,18 +23,22 @@
 #include "vl53l0x_api.h"
 #include "vl53l0x_i2c_platform.h"
 
+#include "build_date.h"
 #include "dds_generator.h"
+#include "dfr0555_display.h"
+#include "encoder.h"
 #include "i2s_output.h"
+#include "menu.h"
 #include "pcm5122.h"
-#include "waveform_select.h"
 
 #define VL53L0X_I2C_ADDRESS   0x29
 #define PITCH_I2C_BUS         0
-#define PITCH_I2C_SPEED_KHZ   400
+#define PITCH_I2C_SPEED_KHZ   100 /* shared with the DFR0555 display, whose LCD drops characters at 400 kHz */
 #define VOLUME_I2C_BUS        1 /* shared with the PCM5122, so its speed */
 #define POLL_PERIOD_MS        50 /* 20 Hz */
 /* PIO_Clock_Divisor and the Phase_Step table assume this system clock. */
 #define SYSTEM_CLOCK_HZ       125000000
+#define SPLASH_MS             2000
 
 /*
  * Longest wait for a measurement, about twice the default 33 ms timing
@@ -71,7 +79,13 @@ struct sensor {
 	uint8_t last_range_status;
 };
 
-static const char *const waveform_names[] = { "Sine", "Sine_2", "Triangle", "Square" };
+/* Shows a short message on line 2 of the display (if it works) and stops. */
+static void fatal(const char *message)
+{
+	DFR0555_Put_Line(1, message);
+	while (true)
+		tight_loop_contents();
+}
 
 static void die_on_error(const char *name, const char *step, VL53L0X_Error status)
 {
@@ -79,8 +93,9 @@ static void die_on_error(const char *name, const char *step, VL53L0X_Error statu
 		printf("%s %s failed: %d\n", name, step, (int)status);
 		if (status == VL53L0X_ERROR_CONTROL_INTERFACE && strcmp(name, "Volume") == 0)
 			PCM5122_Scan_Bus();
-		while (true)
-			tight_loop_contents();
+		char message[DFR0555_Columns + 1];
+		snprintf(message, sizeof(message), "%s %s", name, step);
+		fatal(message);
 	}
 }
 
@@ -196,17 +211,58 @@ static int correct_volume_range(int raw_mm)
 		       (VOLUME_CAL_FAR_READ - VOLUME_CAL_NEAR_READ);
 }
 
+/*
+ * Plays until the encoder is pushed: ranges both sensors every 50 ms and
+ * passes the distances to the DDS generator. Returns with the audio muted.
+ */
+static void play(const struct settings *settings, struct sensor *pitch, struct sensor *volume)
+{
+	I2S_Output_Set_Waveform(settings->waveform);
+	DFR0555_Put_Line(0, Waveform_Names[settings->waveform]);
+	DFR0555_Put_Line(1, ""); /* reserved for Range */
+	Encoder_Flush();
+
+	while (!Encoder_Take_Press()) {
+		absolute_time_t next_poll = make_timeout_time_ms(POLL_PERIOD_MS);
+		VL53L0X_Error pitch_start = start_ranging(pitch);
+		VL53L0X_Error volume_start = start_ranging(volume);
+
+		int pitch_mm;
+		if (!read_range(pitch, pitch_start, &pitch_mm))
+			pitch_mm = Lowest_Note_MM;
+		I2S_Output_Set_Distance(pitch_mm); /* DDS_Generator() clamps it */
+
+		int volume_mm;
+		if (read_range(volume, volume_start, &volume_mm))
+			volume_mm = correct_volume_range(volume_mm);
+		else
+			volume_mm = Mute_MM;
+		I2S_Output_Set_Volume(volume_mm); /* DDS_Generator() clamps it */
+
+		sleep_until(next_poll);
+	}
+	I2S_Output_Set_Volume(Mute_MM);
+}
+
 int main(void)
 {
 	stdio_init_all();
 	sleep_ms(2000); /* let USB CDC enumerate and the sensors finish booting */
 
+	/* Clears a stuck I2C0 and initialises it, before the display uses it. */
+	VL53L0X_comms_initialise(PITCH_I2C_BUS, I2C, PITCH_I2C_SPEED_KHZ);
+	struct settings settings = DEFAULT_SETTINGS;
+	DFR0555_Init(Brightness_PWM(settings.brightness_level));
+	DFR0555_Put_Line(0, "Optical Theremin");
+	DFR0555_Put_Line(1, "Built " Build_Date);
+	printf("Optical Theremin, built %s\n", Build_Date);
+	absolute_time_t splash_end = make_timeout_time_ms(SPLASH_MS);
+
 	uint32_t clk_sys_hz = clock_get_hz(clk_sys);
 	if (clk_sys_hz != SYSTEM_CLOCK_HZ) {
 		printf("System clock is %lu Hz, not %lu Hz: every note would be out of tune\n",
 		       (unsigned long)clk_sys_hz, (unsigned long)SYSTEM_CLOCK_HZ);
-		while (true)
-			tight_loop_contents();
+		fatal("Clock not 125MHz");
 	}
 
 	static struct sensor pitch = { .name = "Pitch" };
@@ -215,11 +271,6 @@ int main(void)
 	init_sensor(&pitch, PITCH_I2C_BUS, PITCH_I2C_SPEED_KHZ, PITCH_RANGE_OFFSET_MM);
 	init_sensor(&volume, VOLUME_I2C_BUS, PCM5122_I2C_Speed_Hz / 1000, VOLUME_RANGE_OFFSET_MM);
 
-	Waveform_Select_Init();
-	Waveforms waveform = Waveform_Select_Read();
-	I2S_Output_Set_Waveform(waveform);
-	printf("Waveform %s\n", waveform_names[waveform]);
-
 	/* BCK/LRCK must be running before the PCM5122 is configured. */
 	I2S_Output_Start();
 
@@ -227,35 +278,17 @@ int main(void)
 	if (!PCM5122_Init()) {
 		printf("PCM5122 init failed\n");
 		I2S_Output_Report_Status();
-		while (true)
-			tight_loop_contents();
+		fatal("PCM5122 failed");
 	}
 	printf("PCM5122 running\n");
 
+	Encoder_Init();
+	sleep_until(splash_end);
+
 	while (true) {
-		absolute_time_t next_poll = make_timeout_time_ms(POLL_PERIOD_MS);
-		VL53L0X_Error pitch_start = start_ranging(&pitch);
-		VL53L0X_Error volume_start = start_ranging(&volume);
-
-		int pitch_mm;
-		if (!read_range(&pitch, pitch_start, &pitch_mm))
-			pitch_mm = Lowest_Note_MM;
-		I2S_Output_Set_Distance(pitch_mm); /* DDS_Generator() clamps it */
-
-		int volume_mm;
-		if (read_range(&volume, volume_start, &volume_mm))
-			volume_mm = correct_volume_range(volume_mm);
-		else
-			volume_mm = Mute_MM;
-		I2S_Output_Set_Volume(volume_mm); /* DDS_Generator() clamps it */
-
-		Waveforms selected = Waveform_Select_Read();
-		if (selected != waveform) {
-			waveform = selected;
-			I2S_Output_Set_Waveform(waveform);
-			printf("Waveform %s\n", waveform_names[waveform]);
-		}
-
-		sleep_until(next_poll);
+		Menu_Run(&settings);
+		printf("Play, waveform %s\n", Waveform_Names[settings.waveform]);
+		play(&settings, &pitch, &volume);
+		printf("Menu\n");
 	}
 }
