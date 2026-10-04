@@ -9,11 +9,12 @@ sensor measures hand distance (mm) over I2C, and a DDS (direct digital
 synthesis) tone generator turns that distance into a tone, streamed over I2S
 to a PCM5122 DAC (PiFi DAC+ V2.0).
 
-Current state (stage 8, spec in `Documents/Stage_8.md`; earlier stages in
-`Stage_2.md`–`Stage_7.md`): at boot a DFR0555 2×16 display shows the
+Current state (stage 9, spec in `Documents/Stage_9.md`; earlier stages in
+`Stage_2.md`–`Stage_8.md`): at boot a DFR0555 2×16 display shows the
 program name and build date, then a menu driven by a rotary encoder with a
 push switch sets the backlight brightness, waveform and octave range (the
-five-octave span starts from A0, A1 or A2; A1 at start-up). Selecting Play
+five-octave span starts from any natural note A0 … A2; Sine_2 and A1 to A6
+at start-up). Selecting Play
 starts the theremin and a push returns to the menu (silent). Settings are
 not saved. In play, two VL53L0X
 sensors are polled at 20 Hz. The
@@ -45,6 +46,10 @@ the distance-measurement app the project grew from).
 
 I2C0 was 400 kHz until stage 7. The display's AiP31068 LCD controller drops
 characters at 400 kHz (a line showed only `>Pa`), so I2C0 runs at 100 kHz.
+Stage 9 retried 400 kHz after the 3.3 V supply fix and it still failed. A
+likely cause: `DFR0555_Put_Line` sends 17 bytes in one burst, and at
+400 kHz a byte (~23 µs) is quicker than the LCD's character write
+(~40 µs); at 100 kHz a byte takes ~90 µs.
 The display is on I2C0 rather than I2C1 because that is easier to wire.
 
 `Documents/Stage_2.md` lists the PCM5122 SDA as "pin 3"; that is the Pi
@@ -123,9 +128,9 @@ It writes:
 
 - `../src/dds_generator.h` — public interface: `PIO_Clock_Divisor`,
   `Sample_Rate`, `Sample_Size`, `Highest_Note_MM`, `Lowest_Note_MM`,
-  `Loud_MM`, `Mute_MM`, `Lowest_Octave_Shift` (−1, written `(-1)`),
-  `Highest_Octave_Shift` (1), `Lowest_Note_Octave` (1, A1 at shift 0),
-  `Octave_Count` (5), the `Waveforms` enum, the `Audio_Sample` struct and
+  `Loud_MM`, `Mute_MM`, the `Octave_Ranges` enum and `Octave_Range_Count`
+  (15), the `Waveforms` enum, the `Audio_Sample` struct,
+  `Default_Waveform` (`Sine_2`), `Default_Octave_Range` (`A1_A6`) and
   the `DDS_Generator()` prototype. `Sample_Rate` is a floating point
   literal; don't use it in firmware (soft float), use `PIO_Clock_Divisor`.
 - `../src/dds_table.h` — `Frequency_Count`, `Phase_Step[]`,
@@ -146,20 +151,23 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   fractional-divider jitter, and the sample rate follows from it (the tool
   computes `Phase_Step[]` from it, so notes are in tune). This assumes a
   125 MHz system clock; `main.c` halts at boot if `clk_sys` differs.
-- `DDS_Generator(Waveform, Tone_Distance, Volume_Distance, Octave_Shift)`
+- `DDS_Generator(Waveform, Pitch_Distance, Volume_Distance, Octave_Range)`
   returns one stereo `Audio_Sample` (two `int32_t`) per call.
-- Pitch: A1 (55 Hz) up 5 octaves to 1760 Hz, 60 mm per octave
+- Pitch: 5 octaves (A1–A6, 55–1760 Hz, by default), 60 mm per octave
   (exponential in distance). Highest note at `Highest_Note_MM` (60 mm),
   lowest at `Lowest_Note_MM` (360 mm). Out-of-range distances clamp to the
   nearest end.
-- Range: `Octave_Shift` (clamped to `Lowest_Octave_Shift` ..
-  `Highest_Octave_Shift`) shifts the `Phase_Step[]` entry left (up) or
-  right (down), so A0–A5, A1–A6 and A2–A7 share one table. A change of
-  shift starts the pitch ramp like a change of distance. The pitch ramp
-  takes the difference of two steps as `int32_t`, so the tool refuses to
-  generate if the highest shifted step is ≥ 2^31.
+- Range: `Phase_Step[]` covers 7 octaves, A7 (index 0) down to A0
+  (index 420, `Frequency_Count` 421). Each `Octave_Ranges` value is the
+  offset into it of the range's highest note, 5 mm per semitone: `A2_A7` =
+  0, `G2_G7` = 10, … `A1_A6` = 60, … `A0_A5` = 120 (15 ranges, one per
+  natural note). Values above `A0_A5` are replaced by
+  `Default_Octave_Range`. A change of range starts the pitch ramp like a
+  change of distance. The pitch ramp takes the difference of two steps as
+  `int32_t`, so the tool refuses to generate if the largest step is
+  ≥ 2^31.
 - `Phase_Step[]` is a 32-bit phase increment per sample, indexed by
-  `Distance - Highest_Note_MM` (index 0 = highest note). Accumulate into a
+  `Distance - Highest_Note_MM + Octave_Range`. Accumulate into a
   `uint32_t` phase; `phase >> Phase_Shift` (22) gives the 10-bit
   `Wave_Table` index (`Sample_Count` = 1024).
 - Pitch ramp (hand-written in `dds_generator.c`): when the distance changes,
@@ -228,7 +236,7 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   the I2S output, initialises the PCM5122 and starts the encoder. Fatal
   errors are printed on USB serial and shown on display line 2 (`fatal()`).
   It then alternates `Menu_Run()` and `play()`. `play()` sets the
-  waveform and octave shift, shows the waveform on line 1 and
+  waveform and octave range, shows the waveform on line 1 and
   "Range A1 to A6" (from `Range_Name()`) on line 2, and
   runs a loop every 50 ms
   (20 Hz) until the encoder is pushed, then mutes. Each loop starts a single ranging measurement on
@@ -263,8 +271,9 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   (`/home/david/Ada/Pi_Common/src/`), version 1.1 module only: AiP31068 LCD
   at 0x3E (display on, cursor off, whole 16-character lines, no Clear) and
   SN3193 backlight at 0x6B (OUT1 only, PWM register 0x04). The SN3193
-  current is 10 mA (`Documents/SN3193.pdf` table 6). At the Ada's
-  17.5 mA the LCD washed out above about half PWM. Failures are printed on
+  current is 17.5 mA (`Documents/SN3193.pdf` table 6). The LCD once
+  washed out above about half PWM at 17.5 mA, so stage 7 used 10 mA; that
+  was traced to the Pico's 3.3 V supply sagging, not the LED current. Failures are printed on
   USB serial only when the state changes and never stop the theremin. If
   `DFR0555_Init()` fails (it once got a NACK just after a flash), the next
   `DFR0555_Put_Line()` retries it first: the LCD powers up with the display
@@ -276,8 +285,10 @@ rebuild, rerun, and commit the `.adb` and regenerated headers together.
   push on Play returns, and a push on any other item edits it. While
   editing, turning changes the value and a push confirms. `>` marks what
   turning changes. Brightness has 16 half-stop levels (PWM 1…255, default
-  8), applied live and stopping at the ends. Range also stops at the ends;
-  Waveform wraps. The display is rewritten only
+  8), applied live and stopping at the ends. Range steps through the
+  `Ranges` table (lowest to highest, so clockwise goes up) and also stops
+  at the ends; Waveform wraps. Defaults come from `Default_Waveform` and
+  `Default_Octave_Range`. The display is rewritten only
   when a line changes.
 - `src/audio_i2s.pio` — 8-instruction I2S transmitter: 32-bit stereo,
   64 BCK per frame (BCK = 2.841 MHz), 2 PIO cycles per bit, integer clock

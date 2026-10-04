@@ -1,5 +1,5 @@
 // This header file contains declarations for the menu, where the
-// backlight brightness and waveform are set before playing. The
+// backlight brightness, waveform and octave range are set before playing. The
 // settings are not saved; each power up starts with the defaults.
 // Author : David Haley
 
@@ -16,11 +16,11 @@
 struct settings {
 	Waveforms waveform;
 	int brightness_level; /* 1 .. Brightness_Levels */
-	int octave_shift;     /* Lowest_Octave_Shift .. Highest_Octave_Shift */
+	Octave_Ranges octave_range;
 };
 
-#define DEFAULT_SETTINGS { .waveform = Sine, .brightness_level = Default_Brightness_Level, \
-			   .octave_shift = 0 }
+#define DEFAULT_SETTINGS { .waveform = Default_Waveform, .brightness_level = Default_Brightness_Level, \
+			   .octave_range = Default_Octave_Range }
 
 // Indexed by Waveforms.
 extern const char *const Waveform_Names [];
@@ -29,9 +29,9 @@ extern const char *const Waveform_Names [];
 // level a half stop (x 1.41) brighter than the one below.
 uint8_t Brightness_PWM (int Level);
 
-// Writes the range for Octave_Shift, for example "A1 to A6", to Text
+// Writes the name of Octave_Range, for example "A1 to A6", to Text
 // (at least DFR0555_Columns characters).
-void Range_Name (int Octave_Shift, char *Text, int Size);
+void Range_Name (Octave_Ranges Octave_Range, char *Text, int Size);
 
 // Mutes the audio and runs the menu until Play is selected. The
 // menu starts with Play selected.

@@ -8,8 +8,8 @@
 // introduced smooth frequency transitions.
 // 20261002 : 32 bit samples. Volume applied by a gain from Volume_Table,
 // ramped in the same way as the frequency.
-// 20261003 : Octave_Shift moves the range by whole octaves by shifting the
-// phase step.
+// 20261003 : Octave_Range moves the range by steps of one note adding to the
+// index into the Phase_Step table.
 
 #include "dds_generator.h"
 #include "dds_table.h"
@@ -20,10 +20,8 @@ _Static_assert (sizeof (Wave_Table [0]) / sizeof (Wave_Table [0] [0]) ==
 _Static_assert (sizeof (Wave_Table) / sizeof (Wave_Table [0]) ==
                   Square + 1,
                 "Wave_Table does not have one row per waveform");
-_Static_assert (Frequency_Count == Lowest_Note_MM - Highest_Note_MM + 1,
-                "Phase_Step does not cover Highest_Note_MM .. Lowest_Note_MM");
-_Static_assert (Lowest_Octave_Shift <= 0 && Highest_Octave_Shift >= 0,
-                "Octave_Shift 0 must be within the range limits");
+_Static_assert (Frequency_Count == Lowest_Note_MM - Highest_Note_MM + A0_A5 + 1,
+                "Phase_Step does not cover every Octave_Range");
 _Static_assert (Volume_Count == Mute_MM - Loud_MM + 1,
                 "Volume_Table does not cover Loud_MM .. Mute_MM");
 
@@ -33,7 +31,7 @@ _Static_assert (Volume_Count == Mute_MM - Loud_MM + 1,
 // clicks) when Distance or Waveform changes.
 static uint32_t Phase = 0;
 
-// When Tone_Distance changes, the phase step glides linearly from its
+// When Pitch_Distance changes, the phase step glides linearly from its
 // current value to the new target over Ramp_Length samples, rather
 // than jumping. Ramping the phase step itself (not the distance in
 // whole mm) gives a smooth glide however small the change, and a new
@@ -50,7 +48,7 @@ static uint32_t Phase = 0;
 // pitch glides up from 0 Hz over the first ramp (while the gain is
 // also ramping up from 0).
 static int Previous_Distance = 0;
-static int Previous_Octave_Shift = 0;
+static Octave_Ranges Previous_Octave_Range = Default_Octave_Range;
 static uint32_t Current_Step = 0;
 static uint32_t Target_Step = 0;
 static int32_t Step_Increment = 0;
@@ -85,12 +83,12 @@ static inline int32_t Apply_Gain (const int32_t Sample, const int32_t Gain) {
 
 Audio_Sample __time_critical_func (DDS_Generator) (
   const Waveforms Waveform,
-  const int Tone_Distance,
+  const int Pitch_Distance,
   const int Volume_Distance,
-  const int Octave_Shift
+  const Octave_Ranges Octave_Range
 ) {
-  int Clamped_Distance = Tone_Distance;
-  int Clamped_Shift = Octave_Shift;
+  int Clamped_Distance = Pitch_Distance;
+  Octave_Ranges Clamped_Range = Octave_Range;
   int Clamped_Volume_Distance = Volume_Distance;
   Waveforms Selected_Waveform = Waveform;
   Audio_Sample Sample;
@@ -100,25 +98,19 @@ Audio_Sample __time_critical_func (DDS_Generator) (
   } else if (Clamped_Distance > Lowest_Note_MM) {
     Clamped_Distance = Lowest_Note_MM;
   } // Clamped_Distance < Highest_Note_MM
-  if (Clamped_Shift < Lowest_Octave_Shift) {
-    Clamped_Shift = Lowest_Octave_Shift;
-  } else if (Clamped_Shift > Highest_Octave_Shift) {
-    Clamped_Shift = Highest_Octave_Shift;
-  } // Clamped_Shift < Lowest_Octave_Shift
+  if ((unsigned) Clamped_Range > (unsigned) A0_A5) {
+    Clamped_Range = Default_Octave_Range;
+  } // (unsigned) Clamped_Range > (unsigned) A0_A5)
   if ((unsigned) Selected_Waveform > (unsigned) Square) {
-    Selected_Waveform = Sine;
+    Selected_Waveform = Default_Waveform;
   } // (unsigned) Selected_Waveform > (unsigned) Square
   if (Clamped_Distance != Previous_Distance ||
-      Clamped_Shift != Previous_Octave_Shift) {
+      Clamped_Range != Previous_Octave_Range) {
     Previous_Distance = Clamped_Distance;
-    Previous_Octave_Shift = Clamped_Shift;
-    // Each octave up doubles the phase step, each octave down halves it.
-    Target_Step = Phase_Step [Clamped_Distance - Highest_Note_MM];
-    if (Clamped_Shift >= 0) {
-      Target_Step <<= Clamped_Shift;
-    } else {
-      Target_Step >>= -Clamped_Shift;
-    } // Clamped_Shift >= 0
+    Previous_Octave_Range = Clamped_Range;
+    // The range offsets the index into Phase_Step.
+    Target_Step = Phase_Step [Clamped_Distance - Highest_Note_MM +
+      Clamped_Range];
     Step_Increment =
       (int32_t) (Target_Step - Current_Step) >> Ramp_Shift;
     Ramp_Count = Ramp_Length;

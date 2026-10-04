@@ -4,8 +4,10 @@
 
 --  Author    : David Haley
 --  Created   : 18/09/2026
---  Last Edit : 02/10/2026
+--  Last Edit : 03/10/2026
 
+--  20261004 : Default_Octave_Range constant and Octave_Range_Count added.
+--  20261003 : Tone_Distance changed to Pitch_Distance.
 --  20261002 : Octave range selection. The DDS generator shifts the phase step
 --  by Octave_Shift, Lowest_Octave_Shift .. Highest_Octave_Shift, so the five
 --  octave span can start from A0, A1 or A2. The limits and the octave number
@@ -20,7 +22,7 @@
 --  20260926 : Reduced range to five octaves. Define for Phase_Shift added
 --  to DDS_generator header file.
 --  20260926 : Header file generation added.
---  20260925 : Revised Sin_2 waveform emulating vaccun tube second order
+--  20260925 : Revised Sine_2 waveform emulating vacuum tube second order
 --  distortion f(Y) := 0.5 * Y ** 2 + 0.75 * Y - 0.25
 --  20260923 : RMS power leveling applied to all wavefotms, sine_2
 --  (sin (X)**2 added, emulating vaccum tube distortion.
@@ -30,8 +32,6 @@ with Ada.Calendar; use Ada.Calendar;
 with Ada.Calendar.Formatting; use Ada.Calendar.Formatting;
 with Ada.Numerics; use Ada.Numerics;
 with Ada.Numerics.Generic_Elementary_Functions;
-with Ada.Strings; use Ada.Strings;
-with Ada.Strings.Fixed; use Ada.Strings.Fixed;
 with Interfaces; use Interfaces;
 
 procedure Optical_Theremin is
@@ -48,7 +48,7 @@ procedure Optical_Theremin is
    subtype Angles is Unsigned_32;
 
    Name_and_Version : constant String :=
-   "Optical_Theremin configuration tool version 20261002";
+   "Optical_Theremin configuration tool version 20261004";
    Author : constant String := "Author : David Haley";
    Documentation : constant String := "../Documents/";
    Source : constant String := "../src/";
@@ -62,24 +62,39 @@ procedure Optical_Theremin is
      Reals (Sample_Bits * PIO_Clock_Divisor * 4);
    Step_Per_Hz : constant Reals := (Reals (Angles'Last) + 1.0) / Sample_Rate;
    A0 : constant Reals := 27.5;
-   A1 : constant Reals := A0 * 2.0;
-   A2 : constant Reals := A1 * 2.0;
-   Octaves : constant Positive := 5;
+   Octaves : constant Positive := 5; -- Playable in one octave range
+   Full_Octaves : constant Positive := 7; -- Range of Frequency_Table
    MM_per_Octave : constant Positive := 60; -- distance in mm to double frequency
    Highest_Note_MM : constant Positive := 60; -- distance for highest note in mm
    Lowest_Note_MM : constant Positive :=
      Highest_Note_MM + MM_per_Octave * Octaves;
-   --  The range can be moved by whole octaves, shifting the phase step.
-   Lowest_Octave_Shift : constant Integer := -1; -- A0 to A5
-   Highest_Octave_Shift : constant Natural := 1; -- A2 to A7
-   Lowest_Note_Octave : constant Positive := 1; -- A1 at Octave_Shift 0
 
-   subtype Frequency_Indices is Positive range Highest_Note_MM .. Lowest_Note_MM;
+   subtype Frequency_Indices is Natural range 0 .. MM_per_Octave * Full_Octaves;
    type Frequency_Element is record
       Frequency : Reals;
       Step : Unsigned_32;
    end record; -- Frequency_Element
    type Frequency_Tables is array (Frequency_Indices) of Frequency_Element;
+
+   type Octave_Ranges is (A2_A7, G2_G7, F2_F7, E2_E7, D2_D7, C2_C7, B1_B6,
+                          A1_A6, G1_G6, F1_F6, E1_E6, D1_D6, C1_C6, B0_B5,
+                          A0_A5);
+   for Octave_Ranges use (A2_A7 => 0,
+                          G2_G7 => 10,
+                          F2_F7 => 20,
+                          E2_E7 => 25,
+                          D2_D7 => 35,
+                          C2_C7 => 45,
+                          B1_B6 => 50,
+                          A1_A6 => MM_per_Octave,
+                          G1_G6 => MM_per_Octave + 10,
+                          F1_F6 => MM_per_Octave + 20,
+                          E1_E6 => MM_per_Octave + 25,
+                          D1_D6 => MM_per_Octave + 35,
+                          C1_C6 => MM_per_Octave + 45,
+                          B0_B5 => MM_per_Octave + 50,
+                          A0_A5 => 2 * MM_per_Octave);
+   Default_Octave_Range : constant Octave_Ranges := A1_A6;
 
    package Step_IO is new Ada.Text_IO.Modular_IO (Unsigned_32);
    use Step_IO;
@@ -117,8 +132,8 @@ procedure Optical_Theremin is
    begin -- Build_Frequency_Table
       for F in Frequency_Indices loop
          Frequency_Table (F).Frequency :=
-         (Reals (2.0) ** (Reals (Lowest_Note_MM - F) / Reals (MM_per_Octave))
-         * A1);
+         (Reals (2.0) ** (Reals (Frequency_Indices'Last - F) /
+           Reals (MM_per_Octave))) * A0;
          Frequency_Table (F).Step :=
            Angles (Reals'Rounding (Frequency_Table (F).Frequency
            * Step_Per_Hz));
@@ -127,14 +142,34 @@ procedure Optical_Theremin is
 
    procedure Put (Frequency_Table : in Frequency_Tables) is
 
+      function In_Range (F : in Frequency_Indices;
+                         Octave_Range : in Octave_Ranges) return Boolean is
+
+         Start_MM : constant Frequency_Indices := Octave_Ranges'Enum_Rep (Octave_Range);
+
+      begin -- Range
+         return Start_MM <= F and F <= Start_MM + Octaves * MM_per_Octave;
+      end In_Range;
+
       Output_File : File_Type;
 
    begin -- Put
       Create (Output_File, Out_File, Documentation & "Frequency.csv");
-      Put_Line (Output_File, """Distance"",""Frequency"",""Step""");
+      Put (Output_File, """Index"",");
+      for R in reverse Octave_Ranges loop
+         Put (Output_File, """" & R'Img & """,");
+      end loop; -- R reverse in Octave_Ranges loop
+      Put_Line (Output_File, """Frequency"",""Step""");
       for F in Frequency_Indices loop
          Put (Output_File, F'Img & ",");
-         Put (Output_File, Frequency_Table (F).Frequency, 5, 3, 0);
+         for R in reverse Octave_Ranges loop
+            if In_Range (F, R) then
+               Put (Output_File, Positive'Image (Highest_Note_MM + F -
+                  Octave_Ranges'Enum_Rep (R)));
+            end if; -- Octave_Ranges'Enum_Rep (A0_A5) <= F and
+            Put (Output_File, ',');
+         end loop; -- R in reverse Octave_Ranges
+         Put (Output_File, Frequency_Table (F).Frequency, 4, 5, 0);
          Put_Line (Output_File, "," & Frequency_Table (F).Step'Img);
       end loop; -- F in Frequency_Indices
       Close (Output_File);
@@ -416,18 +451,20 @@ procedure Optical_Theremin is
       Put (Output_File, "#define Lowest_Note_MM" & Lowest_Note_MM'Img);
       Comment ("Distance for lowest frequency");
       New_Line (Output_File);
-      --  Negative, so 'Img has no leading space; bracketed as a C macro.
-      Put (Output_File, "#define Lowest_Octave_Shift (" &
-             Trim (Lowest_Octave_Shift'Img, Both) & ")");
-      Comment ("Lowest range, A0 to A5");
-      Put (Output_File, "#define Highest_Octave_Shift" &
-             Highest_Octave_Shift'Img);
-      Comment ("Highest range, A2 to A7");
-      Put (Output_File, "#define Lowest_Note_Octave" &
-             Lowest_Note_Octave'Img);
-      Comment ("Octave of the lowest note at Octave_Shift 0");
-      Put (Output_File, "#define Octave_Count" & Octaves'Img);
-      Comment ("Octaves from Lowest_Note_MM to Highest_Note_MM");
+      Put_Line (Output_File, "typedef enum {");
+      for R in Octave_Ranges loop
+         Indent;
+         Put (Output_File, R'Img & " =" & Octave_Ranges'Enum_Rep (R)'Img);
+         if R = Octave_Ranges'Last then
+            New_Line (Output_File);
+         else
+            Put_Line (Output_File, ",");
+         end if; -- R = Octave_Ranges'Last
+      end loop; -- R in Octave_Ranges
+      Put_Line (Output_File, "} Octave_Ranges;");
+      Put (Output_File, "#define Octave_Range_Count" &
+             Natural'Image (Octave_Ranges'Pos (Octave_Ranges'Last) + 1));
+      Comment ("Number of Octave_Ranges");
       New_Line (Output_File);
       Put (Output_File, "#define Loud_MM" & Loud_MM'Img);
       Comment ("Distance for maximum voume");
@@ -452,10 +489,17 @@ procedure Optical_Theremin is
       Put_Line (Output_File, "int32_t Right;");
       Put_Line (Output_File, "} Audio_Sample;");
       New_Line (Output_File);
+      Put_Line (Output_File, "#define Default_Waveform Sine_2");
+      --  Sine_2 is entered as a string becayse it is mixed case. by drfault the
+      --  'Img attribute returns an upper case string, the c language is case
+      --  sensitive, so this would be a problem.
+      Put_Line (Output_File, "#define Default_Octave_Range " &
+                  Default_Octave_Range'Img);
+      New_Line (Output_File);
       Comment ("This function returns a single sample of audio each time it");
       Comment ("is called. The sample rate must be" & Sample_Rate'Img
                & "Hz. Waveform");
-      Comment ("specifies the type of waveform to be produced. Tone_Distance");
+      Comment ("specifies the type of waveform to be produced. Pitch_Distance");
       Comment ("specifies the frequency. The maximum frequency is produced at");
       Comment ("Highest_Note_MM and the minimum frequency is produced at");
       Comment ("Lowest_Note_MM. If the measured distance is out of range,");
@@ -465,18 +509,18 @@ procedure Optical_Theremin is
       Comment ("Volume_Distance defines the output volume, for Loud_MM the");
       Comment ("the maximum output level is produced and for Muted_MM, no");
       Comment ("output is produced.");
-      Comment ("Octave_Shift moves the whole range by whole octaves,");
-      Comment ("Lowest_Octave_Shift .. Highest_Octave_Shift, out of range");
-      Comment ("values are clamped.");
+      Comment ("Octave_Range specifies the range of frequencies playable for");
+      Comment ("the range Highest_Note_MM to Lowest_Note_MM.");
+      Comment ("Values are clamped to their respective valid ranges.");
       Put_Line (Output_File, "Audio_Sample DDS_Generator (");
       Indent;
       Put_Line (Output_File, "const Waveforms Waveform,");
       Indent;
-      Put_Line (Output_File, "const int Tone_Distance,");
+      Put_Line (Output_File, "const int Pitch_Distance,");
       Indent;
       Put_Line (Output_File, "const int Volume_Distance,");
       Indent;
-      Put_Line (Output_File, "const int Octave_Shift");
+      Put_Line (Output_File, "const Octave_Ranges Octave_Range");
       Put_Line (Output_File, ");");
       New_Line (Output_File);
       Put_Line (Output_File, "#endif // DDS_GENERATOR_H");
@@ -614,12 +658,12 @@ begin -- Optical_Theremin
    --  The pitch ramp in the DDS generator takes the difference of two phase
    --  steps as an int32_t, so the largest shifted step must be less than
    --  2 ** 31.
-   if Unsigned_64 (Frequency_Table (Highest_Note_MM).Step) *
-     2 ** Highest_Octave_Shift >= 2 ** 31
+   if Integer_64 (Frequency_Table (Frequency_Indices'First).Step) >=
+     Integer_64 (Integer_32'Last)
    then
       raise Program_Error with
-        "Phase_Step shifted by Highest_Octave_Shift is not less than 2 ** 31";
-   end if; -- Unsigned_64 (Frequency_Table (Highest_Note_MM).Step) * ...
+        "Largest Phase_Step cannot be represebted as a 32 bit integer";
+   end if; -- Integer_64 (Frequency_Table (Frequency_Indices'First).Step) >= ...
    Build (Wave_Table);
    Put (Wave_Table);
    Wave_Properties (Wave_Table, Property_Table);
