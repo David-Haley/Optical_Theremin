@@ -3,6 +3,8 @@
 // theremin: the display is not needed to play.
 // Author : David Haley
 
+// 20261003 : Backlight LED current increased from 10 mA to 17.5 mA.
+
 #include <stdio.h>
 #include <string.h>
 
@@ -31,9 +33,11 @@ static const uint8_t Line_Address [DFR0555_Lines] = {0x00, 0x40};
 #define LED_Shutdown_Run  0x20 // normal operation, all channels enabled
 #define LED_Current       0x03
 // Bits D4:D2: 000 42 mA, 001 10 mA, 010 5 mA, 011 30 mA, 1xx 17.5 mA
-// (Documents/SN3193.pdf, table 6). Above about 9 mA average the LCD
-// washes out, so 10 mA maximum makes the full PWM range usable.
-#define LED_Current_10mA  0x04
+// (Documents/SN3193.pdf, table 6). Display "washing out" at LED currents above
+// 10 mA was due to the 3.3V power sagging possible a bad Pi PICO, should be
+// able to supply 300 mA. Without other information 17.5 mA is probably the
+// maximum safe current.
+#define LED_Current_Value 0x10 // 17.5 mA
 #define LED_PWM_1         0x04 // OUT1, the backlight
 #define LED_PWM_Update    0x07 // any write loads the PWM and control registers
 #define LED_Control       0x1D
@@ -88,7 +92,7 @@ bool DFR0555_Init (uint8_t Brightness) {
     return false;
   } // !Check (...)
   OK = LED_Write (LED_Shutdown, LED_Shutdown_Run) &&
-       LED_Write (LED_Current, LED_Current_10mA) &&
+       LED_Write (LED_Current, LED_Current_Value) &&
        LED_Write (LED_PWM_1, Brightness) &&
        LED_Write (LED_Control, LED_OUT1_Only) &&
        LED_Write (LED_PWM_Update, 0);

@@ -28,10 +28,10 @@ void I2S_Output_Set_Distance (int Distance);
 // clamped by DDS_Generator.
 void I2S_Output_Set_Volume (int Volume_Distance);
 
-// Sets the range in whole octaves, 0 for Lowest_Note_Octave at
-// Lowest_Note_MM. Values outside Lowest_Octave_Shift ..
-// Highest_Octave_Shift are clamped by DDS_Generator.
-void I2S_Output_Set_Octave_Shift (int Octave_Shift);
+// Sets the five octave range played between Lowest_Note_MM and
+// Highest_Note_MM, for example A1_A6. Invalid values are replaced by
+// Default_Octave_Range in DDS_Generator.
+void I2S_Output_Set_Octave_Range (Octave_Ranges Octave_Range);
 
 // Sets the waveform produced by DDS_Generator. The phase is
 // continuous across a change so switching does not click.

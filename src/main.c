@@ -9,7 +9,7 @@
  *
  * At start up the DFR0555 display (on I2C0 with the pitch sensor) shows the program name and
  * build date, then the menu (menu.h), where the rotary encoder (encoder.h)
- * sets the backlight brightness and waveform. Selecting Play starts the
+ * sets the backlight brightness, waveform and octave range. Selecting Play starts the
  * theremin, and pushing the encoder returns to the menu. USB serial carries
  * diagnostic and error messages only.
  */
@@ -220,9 +220,9 @@ static void play(const struct settings *settings, struct sensor *pitch, struct s
 	char range[DFR0555_Columns + 1];
 	char line[DFR0555_Columns + 1];
 
-	Range_Name(settings->octave_shift, range, sizeof(range));
+	Range_Name(settings->octave_range, range, sizeof(range));
 	I2S_Output_Set_Waveform(settings->waveform);
-	I2S_Output_Set_Octave_Shift(settings->octave_shift);
+	I2S_Output_Set_Octave_Range(settings->octave_range);
 	DFR0555_Put_Line(0, Waveform_Names[settings->waveform]);
 	snprintf(line, sizeof(line), "Range %s", range);
 	DFR0555_Put_Line(1, line);

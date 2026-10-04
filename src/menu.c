@@ -73,26 +73,57 @@ static void Edit_Waveform (struct settings *S, int Detents) {
   S->waveform = (Waveforms) Wrap (S->waveform, Detents, Square + 1);
 } // Edit_Waveform
 
-void Range_Name (int Octave_Shift, char *Text, int Size) {
-  const int Lowest = Lowest_Note_Octave + Octave_Shift;
+// Lowest to highest, so turning clockwise raises the range.
+static const struct {
+  Octave_Ranges Range;
+  const char *Name;
+} Ranges [] = {
+  {A0_A5, "A0 to A5"}, {B0_B5, "B0 to B5"}, {C1_C6, "C1 to C6"},
+  {D1_D6, "D1 to D6"}, {E1_E6, "E1 to E6"}, {F1_F6, "F1 to F6"},
+  {G1_G6, "G1 to G6"}, {A1_A6, "A1 to A6"}, {B1_B6, "B1 to B6"},
+  {C2_C7, "C2 to C7"}, {D2_D7, "D2 to D7"}, {E2_E7, "E2 to E7"},
+  {F2_F7, "F2 to F7"}, {G2_G7, "G2 to G7"}, {A2_A7, "A2 to A7"}
+};
 
-  snprintf (Text, Size, "A%d to A%d", Lowest, Lowest + Octave_Count);
+#define Range_Count ((int) (sizeof (Ranges) / sizeof (Ranges [0])))
+
+_Static_assert (Range_Count == Octave_Range_Count,
+                "Ranges does not have one row per Octave_Range");
+
+// Returns the row of Ranges for Octave_Range, the default range's row
+// if it is not found.
+static int Range_Index (Octave_Ranges Octave_Range) {
+  int Default_Index = 0;
+
+  for (int R = 0; R < Range_Count; R++) {
+    if (Ranges [R].Range == Octave_Range) {
+      return R;
+    } // Ranges [R].Range == Octave_Range
+    if (Ranges [R].Range == Default_Octave_Range) {
+      Default_Index = R;
+    } // Ranges [R].Range == Default_Octave_Range
+  } // R < Range_Count
+  return Default_Index;
+} // Range_Index
+
+void Range_Name (Octave_Ranges Octave_Range, char *Text, int Size) {
+  snprintf (Text, Size, "%s", Ranges [Range_Index (Octave_Range)].Name);
 } // Range_Name
 
 static void Format_Range (const struct settings *S, char *Text) {
-  Range_Name (S->octave_shift, Text, DFR0555_Columns);
+  Range_Name (S->octave_range, Text, DFR0555_Columns);
 } // Format_Range
 
 // The ranges are ordered, so like Brightness they stop at the ends.
 static void Edit_Range (struct settings *S, int Detents) {
-  int Shift = S->octave_shift + Detents;
+  int Index = Range_Index (S->octave_range) + Detents;
 
-  if (Shift < Lowest_Octave_Shift) {
-    Shift = Lowest_Octave_Shift;
-  } else if (Shift > Highest_Octave_Shift) {
-    Shift = Highest_Octave_Shift;
-  } // Shift < Lowest_Octave_Shift
-  S->octave_shift = Shift;
+  if (Index < 0) {
+    Index = 0;
+  } else if (Index > Range_Count - 1) {
+    Index = Range_Count - 1;
+  } // Index < 0
+  S->octave_range = Ranges [Index].Range;
 } // Edit_Range
 
 struct menu_item {

@@ -33,9 +33,9 @@ static uint32_t Buffer [2] [Buffer_Words];
 // Written by the main loop, read by the DMA interrupt. A 32 bit
 // store is atomic so no further protection is required.
 static volatile int Distance = Lowest_Note_MM;
-static volatile Waveforms Waveform = Sine;
+static volatile Waveforms Waveform = Default_Waveform;
 static volatile int Volume_Distance = Mute_MM;
-static volatile int Octave_Shift = 0;
+static volatile Octave_Ranges Octave_Range = Default_Octave_Range;
 
 // Fills a buffer with frames. Each frame is the left sample followed
 // by the right sample, see audio_i2s.pio.
@@ -43,12 +43,12 @@ static void __time_critical_func (Fill_Buffer) (uint32_t *Words) {
   const int Current_Distance = Distance;
   const Waveforms Current_Waveform = Waveform;
   const int Current_Volume_Distance = Volume_Distance;
-  const int Current_Octave_Shift = Octave_Shift;
+  const Octave_Ranges Current_Octave_Range = Octave_Range;
   Audio_Sample Sample;
 
   for (int F = 0; F < Buffer_Frames; F++) {
     Sample = DDS_Generator (Current_Waveform, Current_Distance,
-                            Current_Volume_Distance, Current_Octave_Shift);
+                            Current_Volume_Distance, Current_Octave_Range);
     Words [2 * F] = (uint32_t) Sample.Left;
     Words [2 * F + 1] = (uint32_t) Sample.Right;
   } // F < Buffer_Frames
@@ -156,6 +156,6 @@ void I2S_Output_Set_Volume (int New_Volume_Distance) {
   Volume_Distance = New_Volume_Distance;
 } // I2S_Output_Set_Volume
 
-void I2S_Output_Set_Octave_Shift (int New_Octave_Shift) {
-  Octave_Shift = New_Octave_Shift;
-} // I2S_Output_Set_Octave_Shift
+void I2S_Output_Set_Octave_Range (Octave_Ranges New_Octave_Range) {
+  Octave_Range = New_Octave_Range;
+} // I2S_Output_Set_Octave_Range
