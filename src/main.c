@@ -1,5 +1,5 @@
 /*
- * Optical theremin: polls two VL53L0X time-of-flight sensors at 20 Hz.
+ * Optical theremin: reads two VL53L4CD time-of-flight sensors at 20 Hz.
  * The pitch sensor (I2C0, GPIO0/GPIO1, header pins 1 and 2) sets the
  * frequency of the DDS tone generator, whose samples are streamed over I2S
  * to a PCM5122 DAC. The volume sensor shares I2C1 (GPIO2/GPIO3, header pins
@@ -15,23 +15,36 @@
  */
 
 #include <stdio.h>
-#include <string.h>
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 
-#include "vl53l0x_api.h"
-#include "vl53l0x_i2c_platform.h"
+#include "VL53L4CD_api.h"
 
 #include "build_date.h"
 #include "dds_generator.h"
 #include "dfr0555_display.h"
 #include "encoder.h"
+#include "i2c_bus.h"
 #include "i2s_output.h"
 #include "menu.h"
 #include "pcm5122.h"
 
-#define VL53L0X_I2C_ADDRESS   0x29
+#define VL53L4CD_SENSOR_ID    0xEBAA
+
+/*
+ * Writing 0 to the soft reset register holds the sensor in reset, and
+ * writing 1 releases it. XSHUT isn't wired, so this is the only way to
+ * start from a known state: a sensor keeps its state through a Pico reset,
+ * and the VL53L0X firmware once left one held in reset (its ID read 0).
+ * The ULD's own VL53L4CD_SOFT_RESET has a stray parenthesis.
+ */
+#define SOFT_RESET_REGISTER   0x0000
+#define SOFT_RESET_HOLD_MS    1
+#define BOOT_MS               2 /* tBOOT is 1.2 ms maximum */
+#define BOOT_TIMEOUT_MS       100
+#define FIRMWARE_SYSTEM_STATUS 0x00E5 /* VL53L4CD_FIRMWARE__SYSTEM_STATUS */
+#define FIRMWARE_BOOTED       0x03
 #define PITCH_I2C_BUS         0
 #define PITCH_I2C_SPEED_KHZ   100 /* shared with the DFR0555 display, whose LCD drops characters at 400 kHz */
 #define VOLUME_I2C_BUS        1 /* shared with the PCM5122, so its speed */
@@ -41,41 +54,23 @@
 #define SPLASH_MS             10000 /* minimum time the start-up screen is shown */
 
 /*
- * Longest wait for a measurement, about twice the default 33 ms timing
- * budget.
+ * Each sensor ranges on its own, one measurement every POLL_PERIOD_MS,
+ * with the laser on for RANGING_BUDGET_MS of it (the budget must be
+ * shorter than the period).
+ */
+#define RANGING_BUDGET_MS     40
+
+/*
+ * Longest wait for a measurement. The sensors aren't calibrated yet
+ * (stage 10): readings are used as they come.
  */
 #define RANGING_TIMEOUT_MS    70
-
-/*
- * Part-to-part range offsets, replacing the factory (NVM) values. The pitch
- * sensor's factory value of 125.5 mm made every reading far too long; it is
- * set so that a flat card at 300 mm reads 300 mm (with no offset it read
- * 316 mm). The device adds the offset to each range. KEEP_FACTORY_OFFSET
- * leaves the NVM value in place.
- */
-#define KEEP_FACTORY_OFFSET    0x7FFFFFFF
-#define PITCH_RANGE_OFFSET_MM  -16
-#define VOLUME_RANGE_OFFSET_MM KEEP_FACTORY_OFFSET
-
-/*
- * The volume sensor's error is not a fixed offset, so its readings are
- * corrected in firmware by a straight line through two measured points: a
- * flat card at VOLUME_CAL_NEAR_MM and VOLUME_CAL_FAR_MM read
- * VOLUME_CAL_NEAR_READ and VOLUME_CAL_FAR_READ, in tenths of a mm, with the
- * factory offset in place. A card at 150 mm read 165.4 mm, 7.4 mm short of
- * the line (about 8 mm, 4 dB, after correction).
- * (VL53L0X_SetLinearityCorrectiveGain can only scale down.)
- */
-#define VOLUME_CAL_NEAR_MM   100
-#define VOLUME_CAL_NEAR_READ 1262
-#define VOLUME_CAL_FAR_MM    300
-#define VOLUME_CAL_FAR_READ  3128
 
 /* A sensor and what was last reported about it. */
 struct sensor {
 	const char *name;
-	VL53L0X_Dev_t device;
-	VL53L0X_Error last_status;
+	Dev_t device;
+	VL53L4CD_Error last_status;
 	uint8_t last_range_status;
 };
 
@@ -87,108 +82,103 @@ static void fatal(const char *message)
 		tight_loop_contents();
 }
 
-static void die_on_error(const char *name, const char *step, VL53L0X_Error status)
+static void die_on_error(const char *name, const char *step, VL53L4CD_Error status)
 {
-	if (status != VL53L0X_ERROR_NONE) {
+	if (status != VL53L4CD_ERROR_NONE) {
 		printf("%s %s failed: %d\n", name, step, (int)status);
-		if (status == VL53L0X_ERROR_CONTROL_INTERFACE && strcmp(name, "Volume") == 0)
-			PCM5122_Scan_Bus();
 		char message[DFR0555_Columns + 1];
 		snprintf(message, sizeof(message), "%s %s", name, step);
 		fatal(message);
 	}
 }
 
-static void init_sensor(struct sensor *s, uint8_t bus, uint16_t speed_khz, int32_t offset_mm)
+static void init_sensor(struct sensor *s, uint8_t bus, uint16_t speed_khz)
 {
-	VL53L0X_DEV Dev = &s->device;
+	Dev_t dev = VL53L4CD_Dev(bus);
 
-	memset(Dev, 0, sizeof(*Dev));
-	Dev->I2cDevAddr = VL53L0X_I2C_ADDRESS;
-	Dev->I2cBus = bus;
-	Dev->comms_type = I2C;
-	Dev->comms_speed_khz = speed_khz;
-	s->last_status = VL53L0X_ERROR_NONE;
+	s->device = dev;
+	s->last_status = VL53L4CD_ERROR_NONE;
 	s->last_range_status = 0;
 
-	die_on_error(s->name, "comms init", VL53L0X_comms_initialise(bus, I2C, speed_khz));
+	if (!I2C_Bus_Init(bus, speed_khz))
+		die_on_error(s->name, "bus init", VL53L4CD_ERROR_INVALID_ARGUMENT);
 
-	printf("Initialising %s VL53L0X...\n", s->name);
+	printf("Initialising %s VL53L4CD...\n", s->name);
 
-	die_on_error(s->name, "DataInit", VL53L0X_DataInit(Dev));
-	die_on_error(s->name, "StaticInit", VL53L0X_StaticInit(Dev));
+	VL53L4CD_Error status = VL53L4CD_WrByte(dev, SOFT_RESET_REGISTER, 0);
+	if (status == VL53L4CD_ERROR_NONE) {
+		sleep_ms(SOFT_RESET_HOLD_MS);
+		status = VL53L4CD_WrByte(dev, SOFT_RESET_REGISTER, 1);
+	}
+	sleep_ms(BOOT_MS);
+	if (status != VL53L4CD_ERROR_NONE && bus == VOLUME_I2C_BUS)
+		PCM5122_Scan_Bus();
+	die_on_error(s->name, "soft reset", status);
 
-	uint8_t vhv_settings, phase_cal;
-	die_on_error(s->name, "PerformRefCalibration",
-		     VL53L0X_PerformRefCalibration(Dev, &vhv_settings, &phase_cal));
+	/*
+	 * Waits for the sensor to boot. Accessing it during tBOOT left it
+	 * NACKing (and reporting itself booted), hence BOOT_MS first.
+	 * VL53L4CD_SensorInit waits too, but treats any failed transfer as
+	 * fatal.
+	 */
+	absolute_time_t boot_timeout = make_timeout_time_ms(BOOT_TIMEOUT_MS);
+	uint8_t system_status;
+	while (((status = VL53L4CD_RdByte(dev, FIRMWARE_SYSTEM_STATUS, &system_status)) != VL53L4CD_ERROR_NONE ||
+		system_status != FIRMWARE_BOOTED) &&
+	       !time_reached(boot_timeout))
+		sleep_ms(1);
+	if (status == VL53L4CD_ERROR_NONE && system_status != FIRMWARE_BOOTED)
+		status = VL53L4CD_ERROR_TIMEOUT;
+	if (status != VL53L4CD_ERROR_NONE && bus == VOLUME_I2C_BUS)
+		PCM5122_Scan_Bus();
+	die_on_error(s->name, "boot", status);
 
-	uint32_t ref_spad_count;
-	uint8_t is_aperture_spads;
-	die_on_error(s->name, "PerformRefSpadManagement",
-		     VL53L0X_PerformRefSpadManagement(Dev, &ref_spad_count, &is_aperture_spads));
+	uint16_t id;
+	status = VL53L4CD_GetSensorId(dev, &id);
+	if (status == VL53L4CD_ERROR_NONE && id != VL53L4CD_SENSOR_ID) {
+		printf("%s sensor ID 0x%04X, not 0x%04X\n", s->name, id, VL53L4CD_SENSOR_ID);
+		status = VL53L4CD_ERROR_INVALID_ARGUMENT;
+	}
+	if (status != VL53L4CD_ERROR_NONE && bus == VOLUME_I2C_BUS)
+		PCM5122_Scan_Bus();
+	die_on_error(s->name, "sensor ID", status);
 
-	int32_t factory_offset_um;
-	die_on_error(s->name, "GetOffsetCalibrationDataMicroMeter",
-		     VL53L0X_GetOffsetCalibrationDataMicroMeter(Dev, &factory_offset_um));
-	printf("%s factory range offset %ld um\n", s->name, (long)factory_offset_um);
+	die_on_error(s->name, "SensorInit", VL53L4CD_SensorInit(dev));
+	die_on_error(s->name, "SetRangeTiming",
+		     VL53L4CD_SetRangeTiming(dev, RANGING_BUDGET_MS, POLL_PERIOD_MS));
+	die_on_error(s->name, "StartRanging", VL53L4CD_StartRanging(dev));
 
-	if (offset_mm != KEEP_FACTORY_OFFSET)
-		die_on_error(s->name, "SetOffsetCalibrationDataMicroMeter",
-			     VL53L0X_SetOffsetCalibrationDataMicroMeter(Dev, offset_mm * 1000));
-
-	die_on_error(s->name, "SetDeviceMode",
-		     VL53L0X_SetDeviceMode(Dev, VL53L0X_DEVICEMODE_SINGLE_RANGING));
-
-	printf("%s VL53L0X ready\n", s->name);
+	printf("%s VL53L4CD ready\n", s->name);
 }
 
 /*
- * VL53L0X_PerformSingleRangingMeasurement() split in two, so that both
- * sensors (on separate buses) range at the same time: two sequential
- * measurements would take longer than the poll period.
+ * Waits for the sensor's next measurement and sets *range_mm, returning
+ * false if it failed or found nothing in range. Only reports a problem when
+ * it changes, so an empty field of view doesn't print a line on every poll.
  */
-static VL53L0X_Error start_ranging(struct sensor *s)
+static bool read_range(struct sensor *s, int *range_mm)
 {
-	return VL53L0X_StartMeasurement(&s->device);
-}
-
-static VL53L0X_Error finish_ranging(struct sensor *s, VL53L0X_RangingMeasurementData_t *measurement)
-{
-	VL53L0X_DEV Dev = &s->device;
+	VL53L4CD_ResultsData_t result;
 	absolute_time_t timeout = make_timeout_time_ms(RANGING_TIMEOUT_MS);
 	uint8_t ready = 0;
-	VL53L0X_Error status;
+	VL53L4CD_Error status;
 
-	while ((status = VL53L0X_GetMeasurementDataReady(Dev, &ready)) == VL53L0X_ERROR_NONE && !ready) {
-		if (time_reached(timeout))
-			return VL53L0X_ERROR_TIME_OUT;
-		VL53L0X_PollingDelay(Dev);
+	while ((status = VL53L4CD_CheckForDataReady(s->device, &ready)) == VL53L4CD_ERROR_NONE && !ready) {
+		if (time_reached(timeout)) {
+			status = VL53L4CD_ERROR_TIMEOUT;
+			break;
+		}
+		sleep_ms(1);
 	}
-	PALDevDataSet(Dev, PalState, VL53L0X_STATE_IDLE);
 
-	if (status == VL53L0X_ERROR_NONE)
-		status = VL53L0X_GetRangingMeasurementData(Dev, measurement);
-	if (status == VL53L0X_ERROR_NONE)
-		status = VL53L0X_ClearInterruptMask(Dev, 0);
-	return status;
-}
-
-/*
- * Finishes a measurement and sets *range_mm, returning false if it failed or
- * found nothing in range. Only reports a problem when it changes, so an
- * empty field of view doesn't print a line on every poll.
- */
-static bool read_range(struct sensor *s, VL53L0X_Error start_status, int *range_mm)
-{
-	VL53L0X_RangingMeasurementData_t measurement;
-	VL53L0X_Error status = start_status;
-
-	if (status == VL53L0X_ERROR_NONE)
-		status = finish_ranging(s, &measurement);
-	uint8_t range_status = status == VL53L0X_ERROR_NONE ? measurement.RangeStatus : 0;
+	if (status == VL53L4CD_ERROR_NONE)
+		status = VL53L4CD_GetResult(s->device, &result);
+	if (status == VL53L4CD_ERROR_NONE)
+		status = VL53L4CD_ClearInterrupt(s->device);
+	uint8_t range_status = status == VL53L4CD_ERROR_NONE ? result.range_status : 0;
 
 	if (status != s->last_status || range_status != s->last_range_status) {
-		if (status != VL53L0X_ERROR_NONE)
+		if (status != VL53L4CD_ERROR_NONE)
 			printf("%s measurement error: %d\n", s->name, (int)status);
 		else if (range_status != 0)
 			printf("%s out of range (status %u)\n", s->name, range_status);
@@ -196,19 +186,11 @@ static bool read_range(struct sensor *s, VL53L0X_Error start_status, int *range_
 		s->last_range_status = range_status;
 	}
 
-	if (status == VL53L0X_ERROR_NONE && range_status == 0) {
-		*range_mm = measurement.RangeMilliMeter;
+	if (status == VL53L4CD_ERROR_NONE && range_status == 0) {
+		*range_mm = result.distance_mm;
 		return true;
 	}
 	return false;
-}
-
-/* Corrects a volume sensor reading, see VOLUME_CAL_NEAR_MM. */
-static int correct_volume_range(int raw_mm)
-{
-	return VOLUME_CAL_NEAR_MM +
-	       (raw_mm * 10 - VOLUME_CAL_NEAR_READ) * (VOLUME_CAL_FAR_MM - VOLUME_CAL_NEAR_MM) /
-		       (VOLUME_CAL_FAR_READ - VOLUME_CAL_NEAR_READ);
 }
 
 /*
@@ -229,20 +211,23 @@ static void play(const struct settings *settings, struct sensor *pitch, struct s
 	printf("Play, waveform %s, range %s\n", Waveform_Names[settings->waveform], range);
 	Encoder_Flush();
 
+	/*
+	 * The sensors kept ranging in the menu; discard what they measured
+	 * there, so the first readings are fresh.
+	 */
+	VL53L4CD_ClearInterrupt(pitch->device);
+	VL53L4CD_ClearInterrupt(volume->device);
+
 	while (!Encoder_Take_Press()) {
 		absolute_time_t next_poll = make_timeout_time_ms(POLL_PERIOD_MS);
-		VL53L0X_Error pitch_start = start_ranging(pitch);
-		VL53L0X_Error volume_start = start_ranging(volume);
 
 		int pitch_mm;
-		if (!read_range(pitch, pitch_start, &pitch_mm))
+		if (!read_range(pitch, &pitch_mm))
 			pitch_mm = Lowest_Note_MM;
 		I2S_Output_Set_Distance(pitch_mm); /* DDS_Generator() clamps it */
 
 		int volume_mm;
-		if (read_range(volume, volume_start, &volume_mm))
-			volume_mm = correct_volume_range(volume_mm);
-		else
+		if (!read_range(volume, &volume_mm))
 			volume_mm = Mute_MM;
 		I2S_Output_Set_Volume(volume_mm); /* DDS_Generator() clamps it */
 
@@ -257,7 +242,7 @@ int main(void)
 	sleep_ms(2000); /* let USB CDC enumerate and the sensors finish booting */
 
 	/* Clears a stuck I2C0 and initialises it, before the display uses it. */
-	VL53L0X_comms_initialise(PITCH_I2C_BUS, I2C, PITCH_I2C_SPEED_KHZ);
+	I2C_Bus_Init(PITCH_I2C_BUS, PITCH_I2C_SPEED_KHZ);
 	struct settings settings = DEFAULT_SETTINGS;
 	DFR0555_Init(Brightness_PWM(settings.brightness_level));
 	DFR0555_Put_Line(0, "Optical Theremin");
@@ -275,8 +260,8 @@ int main(void)
 	static struct sensor pitch = { .name = "Pitch" };
 	static struct sensor volume = { .name = "Volume" };
 
-	init_sensor(&pitch, PITCH_I2C_BUS, PITCH_I2C_SPEED_KHZ, PITCH_RANGE_OFFSET_MM);
-	init_sensor(&volume, VOLUME_I2C_BUS, PCM5122_I2C_Speed_Hz / 1000, VOLUME_RANGE_OFFSET_MM);
+	init_sensor(&pitch, PITCH_I2C_BUS, PITCH_I2C_SPEED_KHZ);
+	init_sensor(&volume, VOLUME_I2C_BUS, PCM5122_I2C_Speed_Hz / 1000);
 
 	/* BCK/LRCK must be running before the PCM5122 is configured. */
 	I2S_Output_Start();

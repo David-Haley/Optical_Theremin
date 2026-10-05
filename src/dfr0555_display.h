@@ -1,9 +1,9 @@
 // This header file contains declarations for the DFRobot DFR0555
 // 2 x 16 character display, version 1.1: an AiP31068 LCD controller
 // and an SN3193 backlight driver (only OUT1 used), both on I2C0
-// (pins 1 and 2), shared with the pitch VL53L0X. Ported from the
+// (pins 1 and 2), shared with the pitch VL53L4CD. Ported from the
 // Ada package DFR0555_Display (Pi_Common). I2C0 must already be
-// initialised (VL53L0X_comms_initialise) before any call.
+// initialised (I2C_Bus_Init) before any call.
 // Author : David Haley
 
 #ifndef DFR0555_DISPLAY_H

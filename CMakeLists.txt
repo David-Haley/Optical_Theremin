@@ -18,13 +18,9 @@ add_executable(optical_theremin
     src/encoder.c
     src/dfr0555_display.c
     src/menu.c
-    Api/core/src/vl53l0x_api.c
-    Api/core/src/vl53l0x_api_core.c
-    Api/core/src/vl53l0x_api_calibration.c
-    Api/core/src/vl53l0x_api_ranging.c
-    Api/core/src/vl53l0x_api_strings.c
-    Api/platform/src/vl53l0x_platform.c
-    Api/platform/src/vl53l0x_i2c_platform.c
+    src/i2c_bus.c
+    Api/vl53l4cd/VL53L4CD_api.c
+    Api/vl53l4cd/platform.c
 )
 
 pico_generate_pio_header(optical_theremin
@@ -42,8 +38,8 @@ add_custom_target(build_date ALL
 add_dependencies(optical_theremin build_date)
 
 target_include_directories(optical_theremin PRIVATE
-    Api/core/inc
-    Api/platform/inc
+    Api/vl53l4cd
+    src
     ${BUILD_DATE_DIR}
 )
 
