@@ -13,7 +13,7 @@
 #define PCM5122_SDA_Pin      2 // pin 4
 #define PCM5122_SCL_Pin      3 // pin 5
 #define PCM5122_Address      0x4D
-#define PCM5122_I2C_Speed_Hz 100000 // shared with the volume VL53L0X
+#define PCM5122_I2C_Speed_Hz 100000 // shared with the volume VL53L4CD
 
 // Digital volume code (datasheet table 29): 0 is +24 dB and each step
 // is -0.5 dB, so 48 is 0 dB.
@@ -27,7 +27,7 @@
 bool PCM5122_Init (void);
 
 // Prints the I2C1 idle levels and the addresses that acknowledge a
-// read (the PCM5122 at 0x4D and the volume VL53L0X at 0x29).
+// read (the PCM5122 at 0x4D and the volume VL53L4CD at 0x29).
 void PCM5122_Scan_Bus (void);
 
 // Prints the PCM5122 clock and power state registers.

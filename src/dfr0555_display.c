@@ -13,7 +13,7 @@
 
 #include "dfr0555_display.h"
 
-#define Display_I2C_Instance i2c0 // shared with the pitch VL53L0X
+#define Display_I2C_Instance i2c0 // shared with the pitch VL53L4CD
 #define I2C_Timeout_us 20000
 
 // AiP31068 LCD controller. Each write starts with a control byte:
